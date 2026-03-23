@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from scraper import scrape_kakao_reviews, search_kakao_places
 import google.generativeai as genai
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 
 # 1. 환경 설정 및 API 키 장착
 load_dotenv()
@@ -78,7 +79,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], 
+    allow_origins=["*"],  # 일단 모든 Vercel 주소 접속 허용!
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
