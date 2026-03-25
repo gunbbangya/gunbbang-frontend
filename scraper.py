@@ -1,6 +1,6 @@
 import os
 import requests
-
+# hello
 def search_kakao_places(query: str):
     print(f"\n[🚀 광속 API] '{query}' 검색 중...")
     
@@ -65,4 +65,3 @@ def scrape_kakao_reviews(place_url: str):
         print(f"리뷰 추출 에러: {e}")
 
     return reviews
-    
