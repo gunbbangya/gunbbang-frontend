@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from scraper import scrape_kakao_reviews, search_kakao_places
 import google.generativeai as genai
 from dotenv import load_dotenv
-from fastapi.middleware.cors import CORSMiddleware
 
 # 1. 환경 설정 및 API 키 장착
 load_dotenv()
@@ -53,7 +52,7 @@ system_prompt = """
 """
 
 gourmet_model = genai.GenerativeModel(
-    'gemini-2.5-flash',
+    'gemini-1.5-flash',
     system_instruction=system_prompt,
     generation_config={"response_mime_type": "application/json"}
 )
