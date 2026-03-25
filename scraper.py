@@ -41,16 +41,26 @@ def scrape_kakao_reviews(place_url: str):
 
     # 카카오맵이 내부적으로 쓰는 숨겨진 데이터 서버에 다이렉트 요청
     api_url = f"https://place.map.kakao.com/main/v/{place_id}"
+    
+    # 💡 1. 방문증(Referer) 추가!
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": place_url 
     }
 
     response = requests.get(api_url, headers=headers)
+    
+    # 💡 2. CCTV 설치: 카카오가 뭐라고 대답했는지 로그에 찍기
+    print(f"🚨 [CCTV] 카카오 응답 코드: {response.status_code}")
+    
     if response.status_code != 200:
+        print(f"🚨 [CCTV] 카카오가 거절했습니다. 사유: {response.text[:200]}")
         return []
 
     data = response.json()
     reviews = []
+    
+    
 
     try:
         # 데이터 속에서 리뷰(comment)만 쏙 빼오기
