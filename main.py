@@ -96,8 +96,8 @@ def analyze_place(request: AnalyzeRequest):
   
     
     try:
-      prompt = f"식당명: {place_info['name']}\n명령: 아래 리뷰를 분석하고, 최종 결과는 반드시 '{lang}' 언어로만 작성해.\n리뷰:\n{reviews_text}"
-      response = gourmet_model.generate_content(prompt)
+         prompt = f"식당명: {place_info['name']}\n명령: 아래 리뷰를 분석하고, 최종 결과는 반드시 '{lang}' 언어로만 작성해.\n리뷰:\n{reviews_text}"
+         response = gourmet_model.generate_content(prompt)
         
         # JSON 세탁
         cleaned_text = response.text.strip().replace("```json", "").replace("```", "").strip()
