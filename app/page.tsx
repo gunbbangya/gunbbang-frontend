@@ -82,16 +82,15 @@ export default function HomePage() {
 
     const fetchAnalysis = async () => {
       try {
-        // 🌐 1. 접속한 사람의 브라우저 언어 감지 (예: 'ko', 'en', 'ja')
         const userLang = navigator.language.split("-")[0] || "ko";
         
-        // 🚀 2. 구글 API는 카카오 URL을 모르므로, '식당 이름'을 검색어로 씁니다!
+        // 💡 1. 쿼리에는 무조건 '식당 이름'이 들어가야 합니다!
         const query = place.place_name; 
         
         const response = await fetch("https://gunbbang-backend.onrender.com/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          // 💡 3. 식당 이름(query)과 언어(lang)를 같이 포장해서 보냅니다!
+          // 💡 2. 바디에 query와 lang이 둘 다 예쁘게 포장되어야 합니다!
           body: JSON.stringify({ query: query, lang: userLang }),
         });
 

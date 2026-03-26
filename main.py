@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from scraper import search_and_get_reviews 
 import google.generativeai as genai
 from dotenv import load_dotenv
+from typing import Optional
 
 # 1. 환경 설정 및 API 키 장착
 load_dotenv()
@@ -56,7 +57,7 @@ app.add_middleware(
 
 class AnalyzeRequest(BaseModel):
     query: str
-    lang: str = "ko"  # 👈 언어 정보 받을 바구니 추가! (기본값은 한국어)
+    lang: Optional[str] = "ko"
 
 @app.get("/api/search")
 def search_places(q: str):
