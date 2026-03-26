@@ -64,8 +64,15 @@ def search_places(q: str):
         result = search_and_get_reviews(q)
         if not result:
             return []
-        # 프론트엔드가 배열 형식을 기다리므로 리스트로 반환
-        return [result] 
+        
+        # 💡 구글 데이터를 프론트엔드가 알아듣게 '카카오 시절 포장지'로 둔갑시킵니다!
+        formatted_result = {
+            "place_name": result["name"],
+            "address_name": result["address"],
+            "place_url": result["name"]  # 이제 URL 대신 이름 자체를 넘깁니다.
+        }
+        return [formatted_result] 
+        
     except Exception as e:
         print(f"검색 에러: {e}")
         raise HTTPException(status_code=500, detail=str(e))
