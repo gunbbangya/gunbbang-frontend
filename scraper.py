@@ -1,77 +1,49 @@
 import os
 import requests
-# hello
-def search_kakao_places(query: str):
-    print(f"\n[🚀 광속 API] '{query}' 검색 중...")
-    
-    kakao_api_key = os.getenv("KAKAO_API_KEY")
-    if not kakao_api_key:
-        print("🚨 에러: 카카오 API 키가 없습니다!")
-        return []
 
-    # 카카오 공식 로컬 API 호출
-    url = "https://dapi.kakao.com/v2/local/search/keyword.json"
-    headers = {"Authorization": f"KakaoAK {kakao_api_key}"}
-    params = {"query": query, "size": 5}
+def search_and_get_reviews(query: str):
+    api_key = os.getenv("GOOGLE_API_KEY")
+    print(f"\n[🌐 글로벌 구글 검색] '{query}' 검색 및 리뷰 추출 중...")
 
-    response = requests.get(url, headers=headers, params=params)
-    
-    if response.status_code != 200:
-        print(f"카카오 API 검색 실패: {response.text}")
-        return []
-
-    data = response.json()
-    results = []
-    
-    for item in data.get("documents", []):
-        results.append({
-            "place_name": item["place_name"],
-            # 도로명 주소가 없으면 지번 주소 사용
-            "address_name": item.get("road_address_name") or item.get("address_name"),
-            "place_url": f"https://place.map.kakao.com/{item['id']}"
-        })
-        
-    return results
-
-def scrape_kakao_reviews(place_url: str):
-    print(f"\n[🕵️‍♂️ 숨겨진 API] {place_url}에서 리뷰 데이터 직행 추출 중...")
-    
-    # URL에서 식당 고유 ID만 빼내기
-    place_id = place_url.split("/")[-1].split("?")[0].split("#")[0]
-
-    # 카카오맵이 내부적으로 쓰는 숨겨진 데이터 서버에 다이렉트 요청
-    api_url = f"https://place.map.kakao.com/main/v/{place_id}"
-    
-    # 💡 1. 방문증(Referer) 추가!
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": place_url 
+    # 1. 식당 찾기 (Place Search)
+    search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    search_params = {
+        "query": query,
+        "key": api_key,
+        "language": "ko" # 한국어 리뷰 우선, 없으면 현지어
     }
-
-    response = requests.get(api_url, headers=headers)
     
-    # 💡 2. CCTV 설치: 카카오가 뭐라고 대답했는지 로그에 찍기
-    print(f"🚨 [CCTV] 카카오 응답 코드: {response.status_code}")
+    search_res = requests.get(search_url, params=search_params).json()
     
-    if response.status_code != 200:
-        print(f"🚨 [CCTV] 카카오가 거절했습니다. 사유: {response.text[:200]}")
-        return []
+    if not search_res.get("results"):
+        print("🚨 [CCTV] 구글에서 해당 식당을 찾을 수 없습니다.")
+        return None
 
-    data = response.json()
-    reviews = []
+    # 가장 정확한 첫 번째 검색 결과 사용
+    place_data = search_res["results"][0]
+    place_id = place_data["place_id"]
     
+    # 2. 식당 상세 정보 및 리뷰 가져오기 (Place Details)
+    details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+    details_params = {
+        "place_id": place_id,
+        "fields": "name,formatted_address,rating,reviews",
+        "key": api_key,
+        "language": "ko"
+    }
     
+    details_res = requests.get(details_url, params=details_params).json()
+    result = details_res.get("result", {})
 
-    try:
-        # 데이터 속에서 리뷰(comment)만 쏙 빼오기
-        comment_list = data.get("comment", {}).get("list", [])
-        for comment in comment_list:
-            content = comment.get("contents")
-            point = comment.get("point")
-            if content:
-                reviews.append(f"별점: {point}점 - 내용: {content}")
-                
-    except Exception as e:
-        print(f"리뷰 추출 에러: {e}")
+    # 리뷰 데이터 정리
+    raw_reviews = result.get("reviews", [])
+    clean_reviews = [r.get("text", "") for r in raw_reviews if r.get("text")]
 
-    return reviews
+    print(f"✅ [CCTV] '{result.get('name')}' 리뷰 {len(clean_reviews)}개 확보 성공!")
+
+    return {
+        "name": result.get("name"),
+        "address": result.get("formatted_address"),
+        "rating": result.get("rating"),
+        "reviews": clean_reviews
+    }

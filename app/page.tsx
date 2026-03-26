@@ -82,22 +82,27 @@ export default function HomePage() {
 
     const fetchAnalysis = async () => {
       try {
-        const query = place.place_url; 
+        // 🌐 1. 접속한 사람의 브라우저 언어 감지 (예: 'ko', 'en', 'ja')
+        const userLang = navigator.language.split("-")[0] || "ko";
+        
+        // 🚀 2. 구글 API는 카카오 URL을 모르므로, '식당 이름'을 검색어로 씁니다!
+        const query = place.place_name; 
         
         const response = await fetch("https://gunbbang-backend.onrender.com/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query }),
+          // 💡 3. 식당 이름(query)과 언어(lang)를 같이 포장해서 보냅니다!
+          body: JSON.stringify({ query: query, lang: userLang }),
         });
 
         if (!response.ok) throw new Error("Analyze response not ok");
 
         const data = await response.json();
         
-        // 🚨 [여기에 CCTV 추가 완료!] F12(개발자 도구) 콘솔창에서 AI가 뭐라고 보냈는지 확인 가능합니다.
+        // 🚨 [여기에 CCTV 추가 완료!]
         console.log("🤖 AI가 보낸 원본 데이터:", data);
 
-        // 🚨 [방어막 추가 완료!] 이름이 살짝 달라도 찰떡같이 알아듣게 처리합니다.
+        // 🚨 [방어막 추가 완료!]
         setRealScore(data.realScore ?? data.score ?? 0);
         setAiSummary(data.aiSummary ?? "요약 데이터를 불러오지 못했습니다.");
         setChartDetails(data.details ?? { taste: 0, value: 0, service: 0, time: 0 });
