@@ -26,10 +26,9 @@
     } | null>(null);
 
     const [selectedPlace, setSelectedPlace] = useState<{
-      place_name: string;
-      address_name: string;
-      place_url?: string; 
-    } | null>(null);
+      name: string;
+      address: string;
+    } | null>(null);g;
     
     const [searchResults, setSearchResults] = useState<
       { name: string; address: string; }[]
