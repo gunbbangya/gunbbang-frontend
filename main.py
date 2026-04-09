@@ -28,7 +28,7 @@ system_prompt = """
 """
 
 gourmet_model = genai.GenerativeModel(
-    'gemini-1.5-flash',
+    'gemini-1.0-pro',
     system_instruction=system_prompt,
     generation_config={"response_mime_type": "application/json"}
 )
