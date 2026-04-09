@@ -28,7 +28,7 @@
     const [selectedPlace, setSelectedPlace] = useState<{
       name: string;
       address: string;
-    } | null>(null);g;
+    } | null>(null);
     
     const [searchResults, setSearchResults] = useState<
       { name: string; address: string; }[]
