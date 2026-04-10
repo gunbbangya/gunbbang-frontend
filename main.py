@@ -14,11 +14,12 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 DB_FILE = "analysis_cache.json"
 last_queries = {} 
 
-system_prompt = """
+# 프롬프트를 변수로 저장 (분석 시 본문에 합침)
+analysis_prompt_base = """
 당신은 식당의 실체를 파헤치는 '글로벌 리스크 프로파일러 AI'입니다. 
 
 [리뷰 볼륨 판독 지침]
-- 50개 미만: '미검증' 상태. 보수적으로 평가.
+- 50개 미만: '미검증' 상태. 보수적 평가.
 - 500개 이상: '검증된 표본'. 평점 4.0 이상이면 강력 추천.
 - 1,000개 이상: '랜드마크'급. 평점 3.5 이상도 상위 10% 맛집 인정.
 - 예외: 리뷰 500개 이상인데 평점 3.0 미만이면 '고질적 문제 식당'.
@@ -57,15 +58,20 @@ def search_places(q: str, request: Request):
         last_queries[client_ip] = q
         result = search_and_get_reviews(q)
         if not result: return []
+        
+        # 💡 [필독] 프론트엔드가 목록을 다시 그릴 수 있게 모든 키를 다 보냅니다.
         return [{
             "id": result["name"],
-            "place_name": result["name"],
-            "address_name": result["address"],
+            "place_name": result["name"],       # 이 키가 없으면 화면에 이름이 안 뜹니다.
+            "name": result["name"],
+            "address_name": result["address"],   # 이 키가 없으면 주소가 안 뜹니다.
             "road_address_name": result["address"],
             "place_url": result["name"],
             "category_name": "식당"
         }]
-    except: return []
+    except Exception as e:
+        print(f"❌ 검색 오류: {e}")
+        return []
 
 @app.post("/api/analyze")
 async def analyze_place(request: Request):
@@ -90,11 +96,10 @@ async def analyze_place(request: Request):
     if not place_info: raise HTTPException(status_code=404, detail="No info")
 
     try:
-        # 💡 [변경 포인트] 모델 이름을 명시적으로 지정하고 system_instruction을 더 안정적으로 전달
-        # 404 에러 방지를 위해 모델 명칭을 'gemini-1.5-flash'로 고정
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 💡 [수정] 모델 명칭을 gemini-1.5-flash-latest로 변경하여 404 에러 방지
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
         
-        full_prompt = f"{system_prompt}\n\n식당명: {place_info['name']}\n공식 평점: {place_info['rating']}\n전체 리뷰 수: {place_info.get('user_ratings_total', 0)}\n결과 언어: {lang}\n리뷰 내용: {' '.join(place_info['reviews'])}"
+        full_prompt = f"{analysis_prompt_base}\n\n식당명: {place_info['name']}\n공식 평점: {place_info['rating']}\n전체 리뷰 수: {place_info.get('user_ratings_total', 0)}\n결과 언어: {lang}\n리뷰 내용: {' '.join(place_info['reviews'])}"
         
         response = model.generate_content(
             full_prompt,
@@ -108,8 +113,8 @@ async def analyze_place(request: Request):
         save_cache(cache)
         return final_result
     except Exception as e:
-        print(f"❌ 분석 실패: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ 분석 실패 상세: {e}")
+        raise HTTPException(status_code=500, detail="AI 분석 서버 통신 오류")
 
 if __name__ == "__main__":
     import uvicorn
