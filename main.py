@@ -59,7 +59,7 @@ def search_places(q: str):
         result = search_and_get_reviews(q)
         if not result: return []
         
-        # 💡 프론트엔드가 어떤 필드를 요구할지 모르니 다 넣어줍니다 (샷건 방식)
+        # 💡 [해결책 1] 프론트엔드가 어떤 필드를 요구할지 모르니 다 넣어줍니다. (id, query, place_name 모두 지원)
         formatted_result = {
             "id": result["name"],
             "query": result["name"],
@@ -75,19 +75,26 @@ def search_places(q: str):
 
 @app.post("/api/analyze")
 async def analyze_place(request: Request):
+    # 💡 [해결책 2] 바디(JSON)뿐만 아니라 URL 파라미터에서도 이름을 뒤져봅니다.
+    data = {}
     try:
         data = await request.json()
-        print(f"DEBUG: 프론트에서 넘어온 데이터 -> {data}")
+        print(f"DEBUG: 프론트 바디 데이터 -> {data}")
     except:
-        raise HTTPException(status_code=422, detail="JSON 데이터가 비어있습니다.")
+        print("DEBUG: 바디 데이터 없음")
 
-    # 💡 데이터가 query든 id든 place_name이든 뭐라도 있으면 잡습니다.
-    query = data.get("query") or data.get("id") or data.get("place_name")
+    # 우선순위: 바디의 query -> 바디의 id -> 바디의 place_name -> URL의 q 파라미터
+    query = (
+        data.get("query") or 
+        data.get("id") or 
+        data.get("place_name") or 
+        request.query_params.get("q") or 
+        request.query_params.get("query")
+    )
     lang = data.get("lang") or "ko"
 
     if not query:
-        # 데이터가 없을 때 로그를 찍어서 Render 대시보드에서 확인할 수 있게 함
-        print(f"🚨 [에러] 분석할 이름이 없음. 데이터 전체: {data}")
+        print(f"🚨 [에러] 분석할 이름이 끝까지 없음. 수신 데이터: {data}")
         raise HTTPException(status_code=422, detail="분석할 식당 정보(query)가 누락되었습니다.")
 
     cache = load_cache()
@@ -96,6 +103,7 @@ async def analyze_place(request: Request):
         if datetime.now() - datetime.strptime(cached_item["date"], "%Y-%m-%d") < timedelta(days=7):
             return cached_item["result"]
 
+    # 데이터 수집 (구글 검색)
     place_info = search_and_get_reviews(query)
     if not place_info or not place_info.get('reviews'):
         raise HTTPException(status_code=404, detail="리뷰를 찾을 수 없습니다.")
@@ -111,7 +119,7 @@ async def analyze_place(request: Request):
         try:
             ai_data = json.loads(cleaned_text)
         except:
-            ai_data = {"realScore": 0, "aiSummary": "처리 오류", "details": {"taste": 0, "value": 0, "service": 0, "time": 0}}
+            ai_data = {"realScore": 0, "aiSummary": "AI 분석 형식 오류", "details": {"taste": 0, "value": 0, "service": 0, "time": 0}}
         
         final_result = {
             **ai_data,
@@ -125,7 +133,7 @@ async def analyze_place(request: Request):
         return final_result
         
     except Exception as e:
-        print(f"AI 에러: {e}")
+        print(f"AI 분석 에러: {e}")
         raise HTTPException(status_code=500, detail="분석 중 오류 발생")
 
 if __name__ == "__main__":
