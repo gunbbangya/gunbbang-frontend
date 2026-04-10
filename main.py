@@ -1,5 +1,6 @@
 import os
 import json
+import re # 정규표현식 추가
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +12,7 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 DB_FILE = "analysis_cache.json"
-last_queries = {} # 비상용 메모리
+last_queries = {} 
 
 app = FastAPI()
 
@@ -43,16 +44,15 @@ def search_places(q: str, request: Request):
         result = search_and_get_reviews(q)
         if not result: return []
 
-        # 💡 [해결책] 프론트엔드가 어떤 변수명을 쓰든 다 걸리게 샷건 방식으로 보냅니다.
+        # 목록 출력을 위한 이름표들 (검증 완료)
         formatted_result = {
             "id": result["name"],
-            "place_name": result["name"],       # 카카오 표준
-            "name": result["name"],             # 구글/일반 표준
-            "title": result["name"],            # 가끔 쓰이는 표준
-            "address_name": result["address"],   # 카카오 주소
+            "place_name": result["name"],
+            "name": result["name"],
+            "address_name": result["address"],
             "road_address_name": result["address"],
-            "address": result["address"],        # 일반 주소
-            "place_url": result["name"],         # 클릭 시 analyze에 전달될 핵심 값
+            "address": result["address"],
+            "place_url": result["name"], 
             "category_name": "음식점",
             "phone": "Google Maps"
         }
@@ -69,12 +69,11 @@ async def analyze_place(request: Request):
     except:
         data = {}
 
-    # query가 비어있으면 마지막 검색어로 대체 (422 에러 방어)
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
     lang = data.get("lang") or "ko"
 
     if not query:
-        raise HTTPException(status_code=422, detail="분석 대상이 없습니다.")
+        raise HTTPException(status_code=422, detail="대상 누락")
 
     cache = load_cache()
     if query in cache:
@@ -84,20 +83,49 @@ async def analyze_place(request: Request):
 
     place_info = search_and_get_reviews(query)
     if not place_info:
-        raise HTTPException(status_code=404, detail="리뷰를 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail="정보 없음")
 
     try:
-        gourmet_model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
-        prompt = f"식당명: {place_info['name']}\n리뷰를 분석해서 광고 없는 진짜 정보를 JSON으로 줘.\n리뷰:\n" + "\n".join(place_info['reviews'])
-        response = gourmet_model.generate_content(prompt)
-        ai_data = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+        # 가장 안정적인 방식으로 모델 호출
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        final_result = {**ai_data, "name": place_info['name'], "address": place_info['address'], "rating": place_info['rating']}
+        prompt = f"""
+        식당 '{place_info['name']}'의 리뷰들을 분석해서 '진짜 점수'를 뽑아줘.
+        반드시 아래 JSON 형식으로만 답해. 설명은 필요 없어.
+        {{
+            "realScore": 1.0~5.0,
+            "aiSummary": "3줄 요약",
+            "details": {{ "taste": 1~5, "value": 1~5, "service": 1~5, "time": 1~5 }}
+        }}
+        리뷰 내용:
+        {" ".join(place_info['reviews'])}
+        """
+        
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        
+        # 💡 [필살기] AI가 준 텍스트에서 JSON 부분만 정규표현식으로 추출
+        # ```json ... ``` 이나 일반 텍스트가 섞여 있어도 알맹이만 찾아냅니다.
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            json_str = match.group()
+            ai_data = json.loads(json_str)
+        else:
+            raise ValueError("JSON 형식을 찾을 수 없음")
+        
+        final_result = {
+            **ai_data, 
+            "name": place_info['name'], 
+            "address": place_info['address'], 
+            "rating": place_info['rating']
+        }
+        
         cache[query] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
         save_cache(cache)
         return final_result
-    except:
-        raise HTTPException(status_code=500, detail="AI 분석 중 오류")
+    except Exception as e:
+        print(f"❌ AI 분석 상세 에러: {str(e)}") # 로그에 에러 원인 출력
+        raise HTTPException(status_code=500, detail=f"분석 실패: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
