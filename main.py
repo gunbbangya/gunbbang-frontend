@@ -9,16 +9,31 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
-# 💡 [핵심] API 키 설정
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 DB_FILE = "analysis_cache.json"
 last_queries = {} 
 
+# 파운더님의 '지뢰 탐지' 철학을 2026년형 모델에 맞게 주입
+analysis_prompt_base = """
+당신은 식당의 실체를 파헤치는 '글로벌 리스크 프로파일러 AI'입니다. 
+
+[판독 지침]
+- 1,000개 이상/3.5점 이상: 랜드마크 맛집 인정.
+- 위생, 불친절, 바가지 언급 시 즉시 [위험] 경고.
+- 정보가 없는 항목은 반드시 "데이터 부족"으로 표기.
+
+반드시 아래 JSON 형식으로만 응답하세요:
+{
+    "realScore": 1.0~5.0,
+    "aiSummary": "요약",
+    "details": { "taste": "1~5/데이터 부족", "value": "1~5/데이터 부족", "service": "1~5/데이터 부족", "time": "1~5/데이터 부족", "hygiene": "1~5/데이터 부족" }
+}
+"""
+
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# 캐시 관련 함수 (동일)
 def load_cache():
     try:
         if os.path.exists(DB_FILE):
@@ -38,13 +53,12 @@ def search_places(q: str, request: Request):
         result = search_and_get_reviews(q)
         if not result: return []
         
-        # 융단폭격 맵핑 유지
+        # 💡 [목록 복구] 프론트엔드가 어떤 키를 찾든 뜰 수 있게 융단폭격 맵핑
         return [{
             "id": result.get("name"),
             "place_name": result.get("name"),
             "name": result.get("name"),
             "address_name": result.get("address"),
-            "road_address_name": result.get("address"),
             "address": result.get("address"),
             "place_url": result.get("name"),
             "category_name": "식당"
@@ -71,48 +85,33 @@ async def analyze_place(request: Request):
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
 
-    try:
-        # 🔍 [자가진단] 현재 사용 가능한 모델 리스트를 로그에 출력 (터미널에서 확인 가능)
-        print("--- [사용 가능한 모델 리스트 확인] ---")
-        for m in genai.list_models():
-            print(f"Model: {m.name}, Methods: {m.supported_generation_methods}")
-        
-        # 💡 [진짜 필살기] 모델 객체를 생성할 때, 'v1beta'를 우회하는 설정 시도
-        # 만약 라이브러리가 v1beta를 고집한다면, 아예 가장 구형이자 안정적인 'gemini-pro'를 우선 호출해보겠습니다.
-        model = genai.GenerativeModel('gemini-pro') 
-        
-        prompt = f"""
-        식당 분석 보고서를 JSON 형식으로 작성하라.
-        식당명: {place_info['name']}
-        평점: {place_info['rating']}
-        리뷰수: {place_info.get('user_ratings_total', 0)}
-        리뷰: {" ".join(place_info['reviews'])}
+    # 💡 [필살기] 로그에서 확인된 2026년형 모델들로 순차적 시도
+    # 'models/'를 붙여서 경로를 확실히 지정합니다.
+    target_models = ['models/gemini-2.5-flash', 'models/gemini-2.0-flash', 'models/gemini-flash-latest']
+    
+    for model_name in target_models:
+        try:
+            print(f"🚀 {model_name} 모델로 분석 시도 중...")
+            model = genai.GenerativeModel(model_name)
+            
+            prompt = f"{analysis_prompt_base}\n\n식당: {place_info['name']}\n리뷰: {' '.join(place_info['reviews'])}"
+            
+            # response_mime_type을 빼고 표준 텍스트로 요청하여 v1beta 에러를 원천 차단
+            response = model.generate_content(prompt)
+            
+            match = re.search(r'\{.*\}', response.text, re.DOTALL)
+            if match:
+                ai_data = json.loads(match.group())
+                final_result = {**ai_data, "name": place_info['name'], "address": place_info['address'], "rating": place_info['rating']}
+                cache[query] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
+                save_cache(cache)
+                return final_result
+        except Exception as e:
+            print(f"⚠️ {model_name} 실패: {e}")
+            continue
 
-        반드시 아래 JSON 구조만 출력하라:
-        {{
-            "realScore": 1.0~5.0,
-            "aiSummary": "요약",
-            "details": {{ "taste": "1~5/데이터 부족", "value": "1~5/데이터 부족", "service": "1~5/데이터 부족", "time": "1~5/데이터 부족", "hygiene": "1~5/데이터 부족" }}
-        }}
-        """
-
-        response = model.generate_content(prompt)
-        
-        # 정규식 파싱 (안전빵)
-        match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        ai_data = json.loads(match.group())
-        
-        final_result = {**ai_data, "name": place_info['name'], "address": place_info['address'], "rating": place_info['rating']}
-        cache[query] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
-        save_cache(cache)
-        return final_result
-        
-    except Exception as e:
-        print(f"❌ 분석 최종 실패: {e}")
-        # 만약 또 404가 뜨면, 라이브러리가 강제로 v1beta를 쓰고 있다는 뜻입니다.
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=500, detail="2026년형 AI 모델 연결에 실패했습니다.")
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
