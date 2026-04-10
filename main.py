@@ -1,137 +1,117 @@
 import os
 import json
+import re
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from scraper import search_and_get_reviews 
 import google.generativeai as genai
 from dotenv import load_dotenv
-from typing import Optional
 
-# 1. 환경 설정 및 API 키 장착
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 DB_FILE = "analysis_cache.json"
+last_queries = {} 
 
-# AI 시스템 지침 (글로벌 버전)
-system_prompt = """
-당신은 전 세계 식당 리뷰의 진실을 파헤치는 '글로벌 데이터 프로파일러 AI'입니다.
-구글 맵스 리뷰 데이터를 바탕으로, 광고성 글과 무지성 칭찬을 걸러내고 '진짜 경험'만 추출하세요.
-반드시 JSON 형식으로만 답변하세요.
+# 파운더님의 '지뢰 탐지' 철학을 2026년형 모델에 맞게 주입
+analysis_prompt_base = """
+당신은 식당의 실체를 파헤치는 '글로벌 리스크 프로파일러 AI'입니다. 
+
+[판독 지침]
+- 1,000개 이상/3.5점 이상: 랜드마크 맛집 인정.
+- 위생, 불친절, 바가지 언급 시 즉시 [위험] 경고.
+- 정보가 없는 항목은 반드시 "데이터 부족"으로 표기.
+
+반드시 아래 JSON 형식으로만 응답하세요:
 {
     "realScore": 1.0~5.0,
-    "aiSummary": "3줄 요약",
-    "details": { "taste": 1~5, "value": 1~5, "service": 1~5, "time": 1~5 }
+    "aiSummary": "요약",
+    "details": { "taste": "1~5/데이터 부족", "value": "1~5/데이터 부족", "service": "1~5/데이터 부족", "time": "1~5/데이터 부족", "hygiene": "1~5/데이터 부족" }
 }
 """
 
-gourmet_model = genai.GenerativeModel(
-    'gemini-1.0-pro',
-    system_instruction=system_prompt,
-    generation_config={"response_mime_type": "application/json"}
-)
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 def load_cache():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except: return {}
+    try:
+        if os.path.exists(DB_FILE):
+            with open(DB_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    except: pass
     return {}
 
 def save_cache(cache_data):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache_data, f, ensure_ascii=False, indent=4)
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class AnalyzeRequest(BaseModel):
-    query: str
-    lang: Optional[str] = "ko"
+    with open(DB_FILE, "w", encoding="utf-8") as f: json.dump(cache_data, f, ensure_ascii=False, indent=4)
 
 @app.get("/api/search")
-def search_places(q: str):
+def search_places(q: str, request: Request):
+    global last_queries
     try:
+        client_ip = request.client.host
+        last_queries[client_ip] = q
         result = search_and_get_reviews(q)
-        if not result:
-            return []
+        if not result: return []
         
-        # 💡 구글 데이터를 프론트엔드가 알아듣게 '카카오 시절 포장지'로 둔갑시킵니다!
-        formatted_result = {
-            "place_name": result["name"],
-            "address_name": result["address"],
-            "place_url": result["name"]  # 이제 URL 대신 이름 자체를 넘깁니다.
-        }
-        return [formatted_result] 
-        
-    except Exception as e:
-        print(f"검색 에러: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # 💡 [목록 복구] 프론트엔드가 어떤 키를 찾든 뜰 수 있게 융단폭격 맵핑
+        return [{
+            "id": result.get("name"),
+            "place_name": result.get("name"),
+            "name": result.get("name"),
+            "address_name": result.get("address"),
+            "address": result.get("address"),
+            "place_url": result.get("name"),
+            "category_name": "식당"
+        }]
+    except: return []
 
 @app.post("/api/analyze")
-def analyze_place(request: AnalyzeRequest):
-    query = request.query
-    lang = request.lang  # 👈 프론트에서 보낸 언어 꺼내기!
-    cache = load_cache()
+async def analyze_place(request: Request):
+    global last_queries
+    client_ip = request.client.host
+    try:
+        data = await request.json()
+    except: data = {}
 
-    # 1. 캐시 확인
+    query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
+    lang = data.get("lang") or "ko"
+
+    cache = load_cache()
     if query in cache:
         cached_item = cache[query]
-        if datetime.now() - datetime.strptime(cached_item["date"], "%Y-%m-%d") < timedelta(days=7):
-            print(f"⚡ [캐시 적중] {query}")
+        if datetime.now() - datetime.strptime(cached_item["date"], "%Y-%m-%d") < timedelta(days=30):
             return cached_item["result"]
 
-    # 2. 구글 데이터 수집
-    print(f"\n[서버] 글로벌 식당 '{query}' 분석 시작!")
     place_info = search_and_get_reviews(query)
+    if not place_info: raise HTTPException(status_code=404)
 
-    if not place_info or not place_info.get('reviews'):
-        raise HTTPException(status_code=404, detail="리뷰를 찾을 수 없습니다.")
-
-    # 3. AI 분석
-    print(f"[서버] 글로벌 제미나이 가동... (출력 언어: {lang})")
-    reviews_text = "\n---\n".join(place_info['reviews'])
-  
+    # 💡 [필살기] 로그에서 확인된 2026년형 모델들로 순차적 시도
+    # 'models/'를 붙여서 경로를 확실히 지정합니다.
+    target_models = ['models/gemini-2.5-flash', 'models/gemini-2.0-flash', 'models/gemini-flash-latest']
     
-    try:
-         prompt = f"식당명: {place_info['name']}\n명령: 아래 리뷰를 분석하고, 최종 결과는 반드시 '{lang}' 언어로만 작성해.\n리뷰:\n{reviews_text}"
-         response = gourmet_model.generate_content(prompt)
-        
-        # JSON 세탁
-        cleaned_text = response.text.strip().replace("```json", "").replace("```", "").strip()
-        ai_data = json.loads(cleaned_text)
-        
-        # 결과 합치기
-        final_result = {
-            **ai_data,
-            "name": place_info['name'],
-            "address": place_info['address'],
-            "rating": place_info['rating']
-        }
+    for model_name in target_models:
+        try:
+            print(f"🚀 {model_name} 모델로 분석 시도 중...")
+            model = genai.GenerativeModel(model_name)
+            
+            prompt = f"{analysis_prompt_base}\n\n식당: {place_info['name']}\n리뷰: {' '.join(place_info['reviews'])}"
+            
+            # response_mime_type을 빼고 표준 텍스트로 요청하여 v1beta 에러를 원천 차단
+            response = model.generate_content(prompt)
+            
+            match = re.search(r'\{.*\}', response.text, re.DOTALL)
+            if match:
+                ai_data = json.loads(match.group())
+                final_result = {**ai_data, "name": place_info['name'], "address": place_info['address'], "rating": place_info['rating']}
+                cache[query] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
+                save_cache(cache)
+                return final_result
+        except Exception as e:
+            print(f"⚠️ {model_name} 실패: {e}")
+            continue
 
-        # 4. 캐시 저장
-        cache[query] = {
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "result": final_result
-        }
-        save_cache(cache)
-        
-        return final_result
-        
-    except Exception as e:
-        print(f"에러 발생: {e}")
-        raise HTTPException(status_code=500, detail="판독 중 에러가 발생했습니다.")
+    raise HTTPException(status_code=500, detail="2026년형 AI 모델 연결에 실패했습니다.")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
