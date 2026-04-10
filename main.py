@@ -9,11 +9,12 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from typing import Optional
 
-# 1. 환경 설정
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 DB_FILE = "analysis_cache.json"
+# 💡 [비기] 프론트가 이름을 안 보내줄 때를 대비해 마지막 검색어를 메모리에 저장합니다.
+last_searched_query = {}
 
 system_prompt = """
 당신은 전 세계 식당 리뷰의 진실을 파헤치는 '글로벌 데이터 프로파일러 AI'입니다.
@@ -54,19 +55,25 @@ app.add_middleware(
 )
 
 @app.get("/api/search")
-def search_places(q: str):
+def search_places(q: str, request: Request):
+    global last_searched_query
     try:
+        # 클라이언트 IP별로 마지막 검색어를 기억해둡니다. (프론트 보정용)
+        client_ip = request.client.host
+        last_searched_query[client_ip] = q
+        
         result = search_and_get_reviews(q)
         if not result: return []
         
-        # 💡 [해결책 1] 프론트엔드가 어떤 필드를 요구할지 모르니 다 넣어줍니다. (id, query, place_name 모두 지원)
+        # 💡 프론트가 어떤 '키'를 원할지 몰라서 카카오와 구글 형식을 모두 때려박았습니다.
         formatted_result = {
             "id": result["name"],
-            "query": result["name"],
             "place_name": result["name"],
             "address_name": result["address"],
             "road_address_name": result["address"],
-            "place_url": result["name"]
+            "place_url": f"https://www.google.com/search?q={result['name']}", # 실제 URL 형태 제공
+            "category_name": "식당",
+            "phone": ""
         }
         return [formatted_result]
     except Exception as e:
@@ -75,27 +82,29 @@ def search_places(q: str):
 
 @app.post("/api/analyze")
 async def analyze_place(request: Request):
-    # 💡 [해결책 2] 바디(JSON)뿐만 아니라 URL 파라미터에서도 이름을 뒤져봅니다.
-    data = {}
+    global last_searched_query
+    client_ip = request.client.host
+    
     try:
         data = await request.json()
-        print(f"DEBUG: 프론트 바디 데이터 -> {data}")
+        print(f"DEBUG: 수신 데이터 -> {data}")
     except:
-        print("DEBUG: 바디 데이터 없음")
+        data = {}
 
-    # 우선순위: 바디의 query -> 바디의 id -> 바디의 place_name -> URL의 q 파라미터
+    # 1순위: 바디 데이터 / 2순위: 메모리에 저장된 마지막 검색어 (필살기)
     query = (
         data.get("query") or 
         data.get("id") or 
         data.get("place_name") or 
-        request.query_params.get("q") or 
-        request.query_params.get("query")
+        last_searched_query.get(client_ip)
     )
     lang = data.get("lang") or "ko"
 
     if not query:
-        print(f"🚨 [에러] 분석할 이름이 끝까지 없음. 수신 데이터: {data}")
-        raise HTTPException(status_code=422, detail="분석할 식당 정보(query)가 누락되었습니다.")
+        print(f"🚨 [치명적 에러] 이름 찾기 실패. 수신데이터: {data}, IP: {client_ip}")
+        raise HTTPException(status_code=422, detail="분석할 식당 이름을 찾을 수 없습니다.")
+
+    print(f"✅ 최종 결정된 분석 대상: {query}")
 
     cache = load_cache()
     if query in cache:
@@ -103,7 +112,6 @@ async def analyze_place(request: Request):
         if datetime.now() - datetime.strptime(cached_item["date"], "%Y-%m-%d") < timedelta(days=7):
             return cached_item["result"]
 
-    # 데이터 수집 (구글 검색)
     place_info = search_and_get_reviews(query)
     if not place_info or not place_info.get('reviews'):
         raise HTTPException(status_code=404, detail="리뷰를 찾을 수 없습니다.")
@@ -115,11 +123,7 @@ async def analyze_place(request: Request):
         response = gourmet_model.generate_content(prompt)
         
         cleaned_text = response.text.strip().replace("```json", "").replace("```", "").strip()
-        
-        try:
-            ai_data = json.loads(cleaned_text)
-        except:
-            ai_data = {"realScore": 0, "aiSummary": "AI 분석 형식 오류", "details": {"taste": 0, "value": 0, "service": 0, "time": 0}}
+        ai_data = json.loads(cleaned_text)
         
         final_result = {
             **ai_data,
