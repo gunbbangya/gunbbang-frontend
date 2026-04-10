@@ -14,22 +14,55 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 DB_FILE = "analysis_cache.json"
 last_queries = {} 
 
-# 파운더님의 '지뢰 탐지' 철학을 2026년형 모델에 맞게 주입
-analysis_prompt_base = """
-당신은 식당의 실체를 파헤치는 '글로벌 리스크 프로파일러 AI'입니다. 
+# 💡 [핵심] 언어별 프롬프트를 생성하는 함수
+def get_dynamic_prompt(lang, place_info):
+    if lang == "en":
+        # 영어 모드 프롬프트
+        instruction = "You are a 'Global Restaurant Risk Profiler AI' specialized in detecting fake reviews and identifying hidden gems."
+        guidelines = """
+        [Analysis Guidelines]
+        1. Volume Check: If 1,000+ reviews and 4.0+ rating, recognize as a 'Landmark'.
+        2. Mine Detection: Immediate [DANGER] warning for mentions of hygiene, rudeness, or overpricing.
+        3. Integrity: If data for a category (taste, value, etc.) is missing, mark as "Insufficient Data".
+        4. No Marketing: Ignore generic marketing phrases.
+        5. Response Language: You MUST answer strictly in ENGLISH.
+        """
+        json_format = """
+        {
+            "realScore": 1.0~5.0,
+            "aiSummary": "Summary (Max 3 lines)",
+            "details": { "taste": "1~5 or Insufficient Data", "value": "1~5 or Insufficient Data", "service": "1~5 or Insufficient Data", "time": "1~5 or Insufficient Data", "hygiene": "1~5 or Insufficient Data" }
+        }
+        """
+    else:
+        # 한국어 모드 프롬프트 (기존 로직 유지)
+        instruction = "당신은 식당의 실체를 파헤치는 '글로벌 리스크 프로파일러 AI'입니다."
+        guidelines = """
+        [판독 지침]
+        1. 볼륨 판독: 500개 이상/4.0점 이상이면 강력 추천. 1,000개 이상/3.5점 이상이면 랜드마크 맛집 인정.
+        2. 지뢰 경고: 위생, 식중독, 불친절, 바가지 언급 시 즉시 [위험] 경고.
+        3. 데이터 정직성: 근거 없으면 반드시 "데이터 부족" 표기.
+        4. 응답 언어: 반드시 한국어로 답변하세요.
+        """
+        json_format = """
+        {
+            "realScore": 1.0~5.0,
+            "aiSummary": "요약 (3줄 이내)",
+            "details": { "taste": "1~5 또는 데이터 부족", "value": "1~5 또는 데이터 부족", "service": "1~5 또는 데이터 부족", "time": "1~5 또는 데이터 부족", "hygiene": "1~5 또는 데이터 부족" }
+        }
+        """
 
-[판독 지침]
-- 1,000개 이상/3.5점 이상: 랜드마크 맛집 인정.
-- 위생, 불친절, 바가지 언급 시 즉시 [위험] 경고.
-- 정보가 없는 항목은 반드시 "데이터 부족"으로 표기.
+    return f"""
+    {instruction}
+    {guidelines}
 
-반드시 아래 JSON 형식으로만 응답하세요:
-{
-    "realScore": 1.0~5.0,
-    "aiSummary": "요약",
-    "details": { "taste": "1~5/데이터 부족", "value": "1~5/데이터 부족", "service": "1~5/데이터 부족", "time": "1~5/데이터 부족", "hygiene": "1~5/데이터 부족" }
-}
-"""
+    Return strictly in this JSON format:
+    {json_format}
+
+    Restaurant Info: {place_info['name']} (Rating: {place_info['rating']})
+    Reviews to analyze:
+    {" ".join(place_info['reviews'])}
+    """
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -42,7 +75,8 @@ def load_cache():
     return {}
 
 def save_cache(cache_data):
-    with open(DB_FILE, "w", encoding="utf-8") as f: json.dump(cache_data, f, ensure_ascii=False, indent=4)
+    with open(DB_FILE, "w", encoding="utf-8") as f: 
+        json.dump(cache_data, f, ensure_ascii=False, indent=4)
 
 @app.get("/api/search")
 def search_places(q: str, request: Request):
@@ -53,7 +87,6 @@ def search_places(q: str, request: Request):
         result = search_and_get_reviews(q)
         if not result: return []
         
-        # 💡 [목록 복구] 프론트엔드가 어떤 키를 찾든 뜰 수 있게 융단폭격 맵핑
         return [{
             "id": result.get("name"),
             "place_name": result.get("name"),
@@ -77,33 +110,39 @@ async def analyze_place(request: Request):
     lang = data.get("lang") or "ko"
 
     cache = load_cache()
-    if query in cache:
-        cached_item = cache[query]
+    # 💡 캐시 키에 언어 정보 포함 (한/영 결과가 섞이지 않게 함)
+    cache_key = f"{query}_{lang}"
+    
+    if cache_key in cache:
+        cached_item = cache[cache_key]
         if datetime.now() - datetime.strptime(cached_item["date"], "%Y-%m-%d") < timedelta(days=30):
             return cached_item["result"]
 
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
 
-    # 💡 [필살기] 로그에서 확인된 2026년형 모델들로 순차적 시도
-    # 'models/'를 붙여서 경로를 확실히 지정합니다.
     target_models = ['models/gemini-2.5-flash', 'models/gemini-2.0-flash', 'models/gemini-flash-latest']
     
     for model_name in target_models:
         try:
-            print(f"🚀 {model_name} 모델로 분석 시도 중...")
+            print(f"🚀 {model_name} 모델로 {lang} 모드 분석 시작...")
             model = genai.GenerativeModel(model_name)
             
-            prompt = f"{analysis_prompt_base}\n\n식당: {place_info['name']}\n리뷰: {' '.join(place_info['reviews'])}"
+            # 💡 여기서 동적 프롬프트 호출
+            prompt = get_dynamic_prompt(lang, place_info)
             
-            # response_mime_type을 빼고 표준 텍스트로 요청하여 v1beta 에러를 원천 차단
             response = model.generate_content(prompt)
             
             match = re.search(r'\{.*\}', response.text, re.DOTALL)
             if match:
                 ai_data = json.loads(match.group())
-                final_result = {**ai_data, "name": place_info['name'], "address": place_info['address'], "rating": place_info['rating']}
-                cache[query] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
+                final_result = {
+                    **ai_data, 
+                    "name": place_info['name'], 
+                    "address": place_info['address'], 
+                    "rating": place_info['rating']
+                }
+                cache[cache_key] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
                 save_cache(cache)
                 return final_result
         except Exception as e:
