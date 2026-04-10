@@ -59,7 +59,43 @@ def get_dynamic_prompt(lang, place_info):
     """
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+user_requests = defaultdict(list)
+RATE_LIMIT = 10 
+WINDOW_SECONDS = 60
+
+@app.middleware("http")
+async def limit_requests(request: Request, call_next):
+    # API 분석 경로(/api/analyze)에만 제한을 걸고 싶을 때 유용합니다.
+    if request.url.path == "/api/analyze":
+        client_ip = request.client.host
+        now = time.time()
+        user_requests[client_ip] = [t for t in user_requests[client_ip] if now - t < WINDOW_SECONDS]
+        
+        if len(user_requests[client_ip]) >= RATE_LIMIT:
+            # 유저에게 조금 더 친절한 메시지
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=429, 
+                content={"detail": "Too many requests. AI도 숨 좀 돌려야 해요! 1분 뒤에 다시 해주세요. 🚀"}
+            )
+        user_requests[client_ip].append(now)
+    
+    response = await call_next(request)
+    return response
+    
+ALLOWED_ORIGINS = [
+    "https://gunbbang-frontend.vercel.app", 
+    "http://localhost:3000",               
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,  # 이제 리스트에 있는 주소만 허용됩니다.
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def load_cache():
     try:
@@ -91,6 +127,7 @@ def search_places(q: str, request: Request):
     except: return []
 
 @app.post("/api/analyze")
+query = query[:100] if query else query
 async def analyze_place(request: Request):
     global last_queries
     client_ip = request.client.host
