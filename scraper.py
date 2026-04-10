@@ -2,59 +2,48 @@ import os
 import requests
 
 def search_and_get_reviews(query: str):
-    """
-    구글 Places API를 사용하여 식당 정보와 리뷰를 가져옵니다.
-    """
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        print("🚨 [에러] GOOGLE_API_KEY 환경 변수가 설정되지 않았습니다.")
+        print("🚨 [에러] GOOGLE_API_KEY 누락")
         return None
 
-    print(f"\n[🌐 구글 API] '{query}' 검색 시작...")
-
-    # 1. Place Search: 식당 검색하여 place_id 획득
+    # 1. 식당 검색
     search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-    search_params = {
-        "query": query,
-        "key": api_key,
-        "language": "ko"
-    }
+    params = {"query": query, "key": api_key, "language": "ko"}
     
     try:
-        search_res = requests.get(search_url, params=search_params).json()
-        if not search_res.get("results"):
-            print("🚨 [결과 없음] 해당 검색어로 식당을 찾을 수 없습니다.")
+        res = requests.get(search_url, params=params).json()
+        if not res.get("results"):
+            print(f"🚨 [결과 없음] '{query}' 검색 결과가 없습니다.")
             return None
 
-        # 가장 관련성 높은 첫 번째 결과 사용
-        place_data = search_res["results"][0]
-        place_id = place_data["place_id"]
+        place = res["results"][0]
+        place_id = place["place_id"]
         
-        # 2. Place Details: place_id를 이용해 리뷰와 상세 정보 가져오기
+        # 2. 상세 정보 추출 (user_ratings_total 필드 추가!)
         details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-        details_params = {
+        d_params = {
             "place_id": place_id,
-            "fields": "name,formatted_address,rating,reviews",
+            "fields": "name,formatted_address,rating,user_ratings_total,reviews",
             "key": api_key,
             "language": "ko"
         }
         
-        details_res = requests.get(details_url, params=details_params).json()
-        result = details_res.get("result", {})
+        d_res = requests.get(details_url, params=d_params).json()
+        result = d_res.get("result", {})
+        
+        # 리뷰 텍스트 추출
+        reviews = [r.get("text", "") for r in result.get("reviews", []) if r.get("text")]
 
-        # 리뷰 텍스트만 추출 (최대 5개 제공됨)
-        raw_reviews = result.get("reviews", [])
-        clean_reviews = [r.get("text", "") for r in raw_reviews if r.get("text")]
-
-        print(f"✅ [성공] '{result.get('name')}' 데이터 및 리뷰 {len(clean_reviews)}개 확보!")
+        print(f"✅ [구글 데이터 확보] {result.get('name')} (평점: {result.get('rating')}, 리뷰수: {result.get('user_ratings_total')})")
 
         return {
             "name": result.get("name", query),
-            "address": result.get("formatted_address", "주소 정보 없음"),
+            "address": result.get("formatted_address", ""),
             "rating": result.get("rating", 0),
-            "reviews": clean_reviews
+            "user_ratings_total": result.get("user_ratings_total", 0), # 이 데이터가 필수!
+            "reviews": reviews
         }
-
     except Exception as e:
-        print(f"🚨 [API 예외 발생] {e}")
+        print(f"🚨 scraper.py 에러: {e}")
         return None
