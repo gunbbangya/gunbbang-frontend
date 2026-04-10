@@ -56,30 +56,31 @@ app.add_middleware(
 
 @app.get("/api/search")
 def search_places(q: str, request: Request):
-    global last_searched_query
+    global last_queries
     try:
-        # 클라이언트 IP별로 마지막 검색어를 기억해둡니다. (프론트 보정용)
         client_ip = request.client.host
-        last_searched_query[client_ip] = q
+        last_queries[client_ip] = q
         
         result = search_and_get_reviews(q)
-        if not result: return []
+        if not result: return {"documents": []} # 빈 배열도 포장해서 전송
         
-        # 💡 프론트가 어떤 '키'를 원할지 몰라서 카카오와 구글 형식을 모두 때려박았습니다.
+        # 💡 핵심: 프론트엔드가 인식할 수 있게 'documents' 바구니에 담아줍니다.
         formatted_result = {
             "id": result["name"],
             "place_name": result["name"],
             "address_name": result["address"],
             "road_address_name": result["address"],
-            "place_url": f"https://www.google.com/search?q={result['name']}", # 실제 URL 형태 제공
+            "place_url": f"https://www.google.com/search?q={result['name']}",
             "category_name": "식당",
             "phone": ""
         }
-        return [formatted_result]
+        
+        return {"documents": [formatted_result]} # 👈 이 포장지가 중요합니다.
+        
     except Exception as e:
         print(f"검색 에러: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 @app.post("/api/analyze")
 async def analyze_place(request: Request):
     global last_searched_query
