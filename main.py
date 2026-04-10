@@ -38,7 +38,8 @@ def load_cache():
         try:
             with open(DB_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except: return {}
+        except:
+            return {}
     return {}
 
 def save_cache(cache_data):
@@ -101,9 +102,8 @@ def analyze_place(request: AnalyzeRequest):
     # 3. AI 분석
     print(f"[서버] 글로벌 제미나이 가동... (출력 언어: {lang})")
     reviews_text = "\n---\n".join(place_info['reviews'])
-  
     
-   try:
+    try:
         prompt = f"식당명: {place_info['name']}\n명령: 아래 리뷰를 분석하고, 최종 결과는 반드시 '{lang}' 언어로만 작성해.\n리뷰:\n{reviews_text}"
         response = gourmet_model.generate_content(prompt)
         
