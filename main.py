@@ -50,7 +50,7 @@ def load_cache():
         try:
             with open(DB_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except Exception:
             return {}
     return {}
 
@@ -81,7 +81,7 @@ def search_places(q: str):
         if not result:
             return []
         
-        # 🚨 프론트엔드 화면에 목록이 뜨게 하려면 가짜 'id'가 반드시 필요합니다!
+        # 프론트엔드 화면에 목록이 뜨게 하려면 가짜 'id'가 반드시 필요합니다.
         formatted_result = {
             "id": "1",  # 화면 깨짐 방지용 가짜 고유번호
             "place_name": result["name"],
@@ -111,7 +111,6 @@ def analyze_place(request: AnalyzeRequest):
     place_info = search_and_get_reviews(query)
 
     if not place_info or not place_info.get('reviews'):
-        # 리뷰가 없으면 판독 불가 메시지 출력
         raise HTTPException(status_code=404, detail="리뷰 데이터가 부족하여 판독할 수 없습니다.")
 
     print(f"[서버] 글로벌 제미나이 가동... (출력 언어: {lang})")
@@ -121,21 +120,19 @@ def analyze_place(request: AnalyzeRequest):
         prompt = f"식당명: {place_info['name']}\n명령: 아래 리뷰를 분석하고, 최종 결과는 반드시 '{lang}' 언어로만 작성해. 코드블록 치지 말고 무조건 순수 JSON만 반환해.\n리뷰:\n{reviews_text}"
         response = gourmet_model.generate_content(prompt)
         
-        # 🚨 제미나이 헛소리 철저히 세탁 (판독 불가 원인 차단)
         raw_text = response.text.strip()
         cleaned_text = raw_text.replace("```json", "").replace("```", "").strip()
         
         try:
             ai_data = json.loads(cleaned_text)
         except json.JSONDecodeError as json_err:
-            print(f"🚨 JSON 파싱 에러 (제미나이가 문법 틀림): {cleaned_text}")
+            print(f"🚨 JSON 파싱 에러: {json_err}")
             ai_data = {
                 "realScore": 0,
                 "aiSummary": "AI 분석 중 오류가 발생했습니다. 다시 시도해 주세요.",
                 "details": { "taste": 0, "value": 0, "service": 0, "time": 0 }
             }
         
-        # 결과 합치기
         final_result = {
             **ai_data,
             "name": place_info['name'],
@@ -143,8 +140,19 @@ def analyze_place(request: AnalyzeRequest):
             "rating": place_info['rating']
         }
 
-        # 4. 캐시 저장
         cache[query] = {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "result": final_result
         }
+        save_cache(cache)
+        
+        return final_result
+        
+    except Exception as e:
+        print(f"에러 발생: {e}")
+        raise HTTPException(status_code=500, detail="판독 중 에러가 발생했습니다.")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    
