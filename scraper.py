@@ -3,9 +3,14 @@ import requests
 
 def search_and_get_reviews(query: str):
     api_key = os.getenv("GOOGLE_API_KEY")
-    print(f"\n[🌐 글로벌 구글 검색] '{query}' 검색 및 리뷰 추출 중...")
+    # API 키가 없는 경우 대비
+    if not api_key:
+        print("🚨 [에러] GOOGLE_API_KEY 환경 변수가 설정되지 않았습니다.")
+        return None
 
-    # 1. 식당 찾기 (Place Search)
+    print(f"\n[🌐 구글 API] '{query}' 데이터 수집 시작...")
+
+    # 1. Place Search (식당 찾기)
     search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
     search_params = {
         "query": query,
@@ -16,13 +21,13 @@ def search_and_get_reviews(query: str):
     try:
         search_res = requests.get(search_url, params=search_params).json()
         if not search_res.get("results"):
-            print("🚨 [CCTV] 구글에서 해당 식당을 찾을 수 없습니다.")
+            print("🚨 [CCTV] 식당을 찾을 수 없습니다.")
             return None
 
         place_data = search_res["results"][0]
         place_id = place_data["place_id"]
         
-        # 2. 식당 상세 정보 및 리뷰 가져오기 (Place Details)
+        # 2. Place Details (리뷰 가져오기)
         details_url = "https://maps.googleapis.com/maps/api/place/details/json"
         details_params = {
             "place_id": place_id,
@@ -46,5 +51,5 @@ def search_and_get_reviews(query: str):
             "reviews": clean_reviews
         }
     except Exception as e:
-        print(f"🚨 구글 API 호출 에러: {e}")
+        print(f"🚨 API 호출 중 예외 발생: {e}")
         return None
