@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+# 🚨 여기가 핵심! 카카오 지우고 구글 크롤러만 가져옵니다.
 from scraper import search_and_get_reviews 
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -23,10 +24,10 @@ system_prompt = """
 구글 맵스 리뷰 데이터를 바탕으로, 광고성 글과 무지성 칭찬을 걸러내고 '진짜 경험'만 추출하세요.
 
 [출력 형식]
-반드시 아래의 JSON 형식으로만 답변을 반환해 주세요.
+반드시 아래의 JSON 형식으로만 답변을 반환해 주세요. (큰따옴표 문법을 반드시 지키세요!)
 {
-    "realScore": 1.0에서 5.0 사이의 소수점 한 자리 숫자 (프로파일링을 거친 진짜 평점),
-    "aiSummary": "거짓/이벤트 리뷰를 제외하고, 신뢰도 높은 리뷰어들이 꼽은 진짜 장단점을 종합한 3줄 요약평",
+    "realScore": 1.0에서 5.0 사이의 소수점 한 자리 숫자,
+    "aiSummary": "광고를 제외하고, 신뢰도 높은 리뷰어들이 꼽은 진짜 장단점을 종합한 3줄 요약평",
     "details": {
         "taste": 1에서 5 사이의 정수,
         "value": 1에서 5 사이의 정수,
@@ -63,7 +64,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # 🚨 Vercel 프론트엔드 연결 허용
+    allow_origins=["*"], # 🚨 Vercel 프론트엔드 연결 완벽 허용
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -71,20 +72,21 @@ app.add_middleware(
 
 class AnalyzeRequest(BaseModel):
     query: str
-    lang: Optional[str] = "ko" # 프론트에서 보낸 언어 설정 (기본값 한국어)
+    lang: Optional[str] = "ko" # 프론트에서 보낸 언어 (기본값 한국어)
 
 @app.get("/api/search")
 def search_places(q: str):
     try:
+        # 구글맵에서 검색
         result = search_and_get_reviews(q)
         if not result:
             return []
         
-        # 구글 데이터를 프론트엔드가 알아듣게 기존 형식으로 포장
+        # 프론트엔드 구조에 맞춰서 포장 (카카오 시절 변수명 그대로 유지해서 프론트 안 깨지게 방어)
         formatted_result = {
             "place_name": result["name"],
             "address_name": result["address"],
-            "place_url": result["name"]  # URL 대신 이름 자체를 넘김
+            "place_url": result["name"]  # URL 대신 이름 넘김
         }
         return [formatted_result] 
         
@@ -121,7 +123,7 @@ def analyze_place(request: AnalyzeRequest):
         prompt = f"식당명: {place_info['name']}\n명령: 아래 리뷰를 분석하고, 최종 결과는 반드시 '{lang}' 언어로만 작성해.\n리뷰:\n{reviews_text}"
         response = gourmet_model.generate_content(prompt)
         
-        # JSON 텍스트 세탁
+        # JSON 텍스트 세탁 (마크다운 제거)
         raw_text = response.text
         cleaned_text = raw_text.strip()
         if cleaned_text.startswith("```json"):
@@ -133,13 +135,14 @@ def analyze_place(request: AnalyzeRequest):
             
         cleaned_text = cleaned_text.strip() 
         
+        # 파싱 에러 방어
         try:
             ai_data = json.loads(cleaned_text)
         except json.JSONDecodeError as json_err:
             print(f"🚨 JSON 파싱 에러: {json_err}")
             ai_data = {
                 "realScore": 0,
-                "aiSummary": "AI 분석 중 오류가 발생했습니다.",
+                "aiSummary": "AI 분석 중 오류가 발생했습니다. 다시 시도해 주세요.",
                 "details": { "taste": 0, "value": 0, "service": 0, "time": 0 }
             }
         
