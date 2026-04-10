@@ -9,12 +9,14 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from typing import Optional
 
+# 1. 환경 설정
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 DB_FILE = "analysis_cache.json"
-# 💡 [비기] 프론트가 이름을 안 보내줄 때를 대비해 마지막 검색어를 메모리에 저장합니다.
-last_searched_query = {}
+
+# 💡 [필수] 에러 방지를 위해 변수를 미리 정의합니다.
+last_queries = {}
 
 system_prompt = """
 당신은 전 세계 식당 리뷰의 진실을 파헤치는 '글로벌 데이터 프로파일러 AI'입니다.
@@ -62,50 +64,43 @@ def search_places(q: str, request: Request):
         last_queries[client_ip] = q
         
         result = search_and_get_reviews(q)
-        if not result: return {"documents": []} # 빈 배열도 포장해서 전송
+        if not result: return {"documents": []}
         
-        # 💡 핵심: 프론트엔드가 인식할 수 있게 'documents' 바구니에 담아줍니다.
+        # 💡 프론트엔드 화면에 목록이 뜨게 하려면 'documents'라는 바구니에 담아야 합니다.
         formatted_result = {
             "id": result["name"],
+            "query": result["name"],
             "place_name": result["name"],
             "address_name": result["address"],
             "road_address_name": result["address"],
             "place_url": f"https://www.google.com/search?q={result['name']}",
-            "category_name": "식당",
-            "phone": ""
+            "category_name": "식당"
         }
-        
-        return {"documents": [formatted_result]} # 👈 이 포장지가 중요합니다.
-        
+        return {"documents": [formatted_result]}
     except Exception as e:
         print(f"검색 에러: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-        
+
 @app.post("/api/analyze")
 async def analyze_place(request: Request):
-    global last_searched_query
+    global last_queries
     client_ip = request.client.host
     
     try:
         data = await request.json()
-        print(f"DEBUG: 수신 데이터 -> {data}")
     except:
         data = {}
 
-    # 1순위: 바디 데이터 / 2순위: 메모리에 저장된 마지막 검색어 (필살기)
     query = (
         data.get("query") or 
         data.get("id") or 
         data.get("place_name") or 
-        last_searched_query.get(client_ip)
+        last_queries.get(client_ip)
     )
     lang = data.get("lang") or "ko"
 
     if not query:
-        print(f"🚨 [치명적 에러] 이름 찾기 실패. 수신데이터: {data}, IP: {client_ip}")
-        raise HTTPException(status_code=422, detail="분석할 식당 이름을 찾을 수 없습니다.")
-
-    print(f"✅ 최종 결정된 분석 대상: {query}")
+        raise HTTPException(status_code=422, detail="분석할 식당 정보를 찾을 수 없습니다.")
 
     cache = load_cache()
     if query in cache:
