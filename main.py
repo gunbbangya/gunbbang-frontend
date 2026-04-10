@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-# 반드시 scraper.py에 search_and_get_reviews 함수가 있어야 합니다.
 from scraper import search_and_get_reviews 
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -16,14 +15,12 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 DB_FILE = "analysis_cache.json"
 
-# 💡 [치명적 실수 수정] 변수를 함수 밖에서 미리 선언해야 합니다.
+# 💡 전역 변수: 프론트에서 query를 누락할 경우를 대비한 메모리 저장소
 last_queries = {}
 
-# AI 시스템 지침
 system_prompt = """
 당신은 전 세계 식당 리뷰의 진실을 파헤치는 '글로벌 데이터 프로파일러 AI'입니다.
-구글 맵스 리뷰 데이터를 바탕으로, 광고성 글과 무지성 칭찬을 걸러내고 '진짜 경험'만 추출하세요.
-반드시 JSON 형식으로만 답변하세요.
+구글 맵스 리뷰 데이터를 바탕으로 분석하세요. 반드시 JSON으로만 답변하세요.
 {
     "realScore": 1.0~5.0,
     "aiSummary": "3줄 요약평",
@@ -32,12 +29,11 @@ system_prompt = """
 """
 
 gourmet_model = genai.GenerativeModel(
-    'gemini-1.5-flash', # 혹은 파운더님이 사용하시는 모델명 확인
+    'gemini-1.5-flash',
     system_instruction=system_prompt,
     generation_config={"response_mime_type": "application/json"}
 )
 
-# 캐시 관리 함수
 def load_cache():
     if os.path.exists(DB_FILE):
         try:
@@ -60,34 +56,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 1. 검색 엔드포인트: 'documents' 포장지 추가
 @app.get("/api/search")
 def search_places(q: str, request: Request):
-    global last_queries # 미리 선언된 변수를 사용합니다.
+    global last_queries
     try:
         client_ip = request.client.host
-        last_queries[client_ip] = q # 프론트가 이름을 안 보낼 때를 대비해 기억함
+        last_queries[client_ip] = q
         
         result = search_and_get_reviews(q)
-        if not result: return {"documents": []}
+        if not result: return [] # 결과 없으면 빈 배열
         
-        # 프론트엔드(Next.js)가 기대하는 카카오식 데이터 구조
+        # 💡 [원상복구] 프론트엔드가 '배열'을 원하므로 다시 리스트로 보냅니다.
+        # UI가 짤막하게 보이지 않도록 카테고리와 전화번호 필드를 더미 데이터로 채웠습니다.
         formatted_result = {
             "id": result["name"],
             "place_name": result["name"],
+            "category_name": "음식점 > 식당",
+            "category_group_name": "음식점",
+            "phone": "정보 없음",
             "address_name": result["address"],
             "road_address_name": result["address"],
-            "place_url": f"https://www.google.com/search?q={result['name']}",
-            "category_name": "식당"
+            "place_url": result["name"],  # 클릭 시 이 값이 analyze의 query로 전달됨
+            "distance": ""
         }
         
-        # 💡 리스트를 'documents'라는 키에 담아줘야 화면에 나타납니다.
-        return {"documents": [formatted_result]}
+        # 리스트([]) 형식으로 반환해야 프론트엔드 .map()이 작동합니다.
+        return [formatted_result]
+        
     except Exception as e:
         print(f"검색 에러: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# 2. 분석 엔드포인트: 유연한 데이터 수신
 @app.post("/api/analyze")
 async def analyze_place(request: Request):
     global last_queries
@@ -95,18 +94,15 @@ async def analyze_place(request: Request):
     
     try:
         data = await request.json()
-        print(f"DEBUG: 프론트 전송 데이터 -> {data}")
     except:
         data = {}
 
-    # query가 없으면 마지막 검색어(last_queries)를 가져옴
+    # query가 비어있으면 마지막 검색어(last_queries)를 사용하여 422 에러 방어
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
     lang = data.get("lang") or "ko"
 
     if not query:
-        raise HTTPException(status_code=422, detail="분석할 식당 정보(query)가 누락되었습니다.")
-
-    print(f"✅ 분석 대상 확정: {query}")
+        raise HTTPException(status_code=422, detail="분석할 대상을 찾을 수 없습니다.")
 
     cache = load_cache()
     if query in cache:
