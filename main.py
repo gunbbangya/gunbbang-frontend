@@ -1,9 +1,12 @@
 import os
 import json
 import re
+import time  # 💡 추가됨
+from collections import defaultdict  # 💡 추가됨
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse # 💡 추가됨
 from scraper import search_and_get_reviews 
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -14,9 +17,13 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 DB_FILE = "analysis_cache.json"
 last_queries = {} 
 
+# --- Rate Limit 설정 ---
+user_requests = defaultdict(list)
+RATE_LIMIT = 10 
+WINDOW_SECONDS = 60
+
 def get_dynamic_prompt(lang, place_info):
     if lang == "en":
-        # 영어 모드: 이름과 주소도 영어로 번역하도록 지시 추가
         instruction = "You are a 'Global Restaurant Risk Profiler AI'. TRANSLATE the restaurant name and address into English naturally."
         guidelines = """
         [Guidelines]
@@ -35,7 +42,6 @@ def get_dynamic_prompt(lang, place_info):
         }
         """
     else:
-        # 한국어 모드: 원래 데이터 유지
         instruction = "당신은 식당의 실체를 파헤치는 '글로벌 리스크 프로파일러 AI'입니다."
         guidelines = "모든 답변을 한국어로 작성하고, 이름과 주소는 원문 그대로 유지하세요."
         json_format = """
@@ -47,51 +53,34 @@ def get_dynamic_prompt(lang, place_info):
             "details": { "taste": "1~5/데이터 부족", "value": "1~5/데이터 부족", "service": "1~5/데이터 부족", "time": "1~5/데이터 부족", "hygiene": "1~5/데이터 부족" }
         }
         """
-
-    return f"""
-    {instruction}
-    {guidelines}
-    Return strictly in this JSON format:
-    {json_format}
-
-    Input Data: Name: {place_info['name']}, Address: {place_info['address']}
-    Reviews: {" ".join(place_info['reviews'])}
-    """
+    return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nInput Data: Name: {place_info['name']}, Address: {place_info['address']}\nReviews: {' '.join(place_info['reviews'])}"
 
 app = FastAPI()
 
-user_requests = defaultdict(list)
-RATE_LIMIT = 10 
-WINDOW_SECONDS = 60
-
+# --- 미들웨어: Rate Limit ---
 @app.middleware("http")
 async def limit_requests(request: Request, call_next):
-    # API 분석 경로(/api/analyze)에만 제한을 걸고 싶을 때 유용합니다.
     if request.url.path == "/api/analyze":
         client_ip = request.client.host
         now = time.time()
         user_requests[client_ip] = [t for t in user_requests[client_ip] if now - t < WINDOW_SECONDS]
         
         if len(user_requests[client_ip]) >= RATE_LIMIT:
-            # 유저에게 조금 더 친절한 메시지
-            from fastapi.responses import JSONResponse
             return JSONResponse(
                 status_code=429, 
                 content={"detail": "Too many requests. AI도 숨 좀 돌려야 해요! 1분 뒤에 다시 해주세요. 🚀"}
             )
         user_requests[client_ip].append(now)
-    
-    response = await call_next(request)
-    return response
-    
+    return await call_next(request)
+
+# --- 미들웨어: CORS ---
 ALLOWED_ORIGINS = [
     "https://gunbbang-frontend.vercel.app", 
-    "http://localhost:3000",               
+    "http://localhost:3000",                
 ]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,  # 이제 리스트에 있는 주소만 허용됩니다.
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -127,7 +116,6 @@ def search_places(q: str, request: Request):
     except: return []
 
 @app.post("/api/analyze")
-query = query[:100] if query else query
 async def analyze_place(request: Request):
     global last_queries
     client_ip = request.client.host
@@ -136,8 +124,12 @@ async def analyze_place(request: Request):
     except: data = {}
 
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
+    
+    # 💡 [보안] 100자 제한 로직의 올바른 위치
+    if query:
+        query = query[:100]
+        
     lang = data.get("lang") or "ko"
-
     cache = load_cache()
     cache_key = f"{query}_{lang}"
     
@@ -156,25 +148,19 @@ async def analyze_place(request: Request):
             model = genai.GenerativeModel(model_name)
             prompt = get_dynamic_prompt(lang, place_info)
             response = model.generate_content(prompt)
-            
             match = re.search(r'\{.*\}', response.text, re.DOTALL)
             if match:
                 ai_data = json.loads(match.group())
-                
-                # 💡 [핵심] AI가 번역해준 이름을 우선 사용하고, 없으면 원래 이름 사용
                 final_result = {
                     **ai_data, 
                     "name": ai_data.get("translatedName") or place_info['name'], 
                     "address": ai_data.get("translatedAddress") or place_info['address'], 
                     "rating": place_info['rating']
                 }
-                
                 cache[cache_key] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
                 save_cache(cache)
                 return final_result
-        except Exception as e:
-            continue
-
+        except: continue
     raise HTTPException(status_code=500, detail="분석 실패")
 
 if __name__ == "__main__":
