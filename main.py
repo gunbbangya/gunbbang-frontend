@@ -14,7 +14,7 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 DB_FILE = "analysis_cache.json"
 last_queries = {} 
 
-# 프롬프트를 변수로 저장 (분석 시 본문에 합침)
+# 파운더님의 '지뢰 탐지' 철학 프롬프트
 analysis_prompt_base = """
 당신은 식당의 실체를 파헤치는 '글로벌 리스크 프로파일러 AI'입니다. 
 
@@ -26,13 +26,13 @@ analysis_prompt_base = """
 
 [분석 규칙]
 1. 치명적 단점(위생, 식중독, 불친절, 바가지) 발견 시 [위험] 경고 우선.
-2. 근거 없는 항목은 반드시 "데이터 부족"으로 기재.
-3. '재방문' 등 상투적 광고 멘트 제외.
+2. 데이터 부재 시 처리: 맛, 가성비, 서비스, 시간, 위생 중 근거가 없으면 반드시 점수 대신 "데이터 부족"으로 기재할 것.
+3. 재방문 멘트 무시: 상투적인 광고 멘트는 가점 요인에서 배제.
 
 [출력 형식 - JSON]
 {
     "realScore": 1.0~5.0,
-    "aiSummary": "요약",
+    "aiSummary": "지뢰 여부 요약",
     "details": { "taste": "1~5/데이터 부족", "value": "1~5/데이터 부족", "service": "1~5/데이터 부족", "time": "1~5/데이터 부족", "hygiene": "1~5/데이터 부족" }
 }
 """
@@ -59,19 +59,17 @@ def search_places(q: str, request: Request):
         result = search_and_get_reviews(q)
         if not result: return []
         
-        # 💡 [필독] 프론트엔드가 목록을 다시 그릴 수 있게 모든 키를 다 보냅니다.
+        # 💡 [주소 해결] 프론트엔드 UI에 주소가 뜨도록 키값을 확실히 맞췄습니다.
         return [{
             "id": result["name"],
-            "place_name": result["name"],       # 이 키가 없으면 화면에 이름이 안 뜹니다.
-            "name": result["name"],
-            "address_name": result["address"],   # 이 키가 없으면 주소가 안 뜹니다.
-            "road_address_name": result["address"],
+            "place_name": result["name"],
+            "address_name": result["address"],       # 일반 주소
+            "road_address_name": result["address"],  # 도로명 주소
+            "address": result["address"],           # 비상용
             "place_url": result["name"],
             "category_name": "식당"
         }]
-    except Exception as e:
-        print(f"❌ 검색 오류: {e}")
-        return []
+    except: return []
 
 @app.post("/api/analyze")
 async def analyze_place(request: Request):
@@ -84,7 +82,7 @@ async def analyze_place(request: Request):
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
     lang = data.get("lang") or "ko"
 
-    if not query: raise HTTPException(status_code=422, detail="Missing query")
+    if not query: raise HTTPException(status_code=422, detail="Query missing")
 
     cache = load_cache()
     if query in cache:
@@ -96,11 +94,12 @@ async def analyze_place(request: Request):
     if not place_info: raise HTTPException(status_code=404, detail="No info")
 
     try:
-        # 💡 [수정] 모델 명칭을 gemini-1.5-flash-latest로 변경하여 404 에러 방지
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        # 💡 [모델 해결] 가장 표준적인 모델명으로 교체
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         full_prompt = f"{analysis_prompt_base}\n\n식당명: {place_info['name']}\n공식 평점: {place_info['rating']}\n전체 리뷰 수: {place_info.get('user_ratings_total', 0)}\n결과 언어: {lang}\n리뷰 내용: {' '.join(place_info['reviews'])}"
         
+        # GenerationConfig를 통해 모델의 널뛰기 방지
         response = model.generate_content(
             full_prompt,
             generation_config={"temperature": 0.1, "response_mime_type": "application/json"}
@@ -114,8 +113,9 @@ async def analyze_place(request: Request):
         return final_result
     except Exception as e:
         print(f"❌ 분석 실패 상세: {e}")
-        raise HTTPException(status_code=500, detail="AI 분석 서버 통신 오류")
+        # 에러 발생 시 프론트엔드가 무한 로딩에 빠지지 않게 에러 메시지 반환
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=10000) # Render 기본 포트 준수
