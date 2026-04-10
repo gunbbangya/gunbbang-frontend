@@ -14,6 +14,36 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 DB_FILE = "analysis_cache.json"
 last_queries = {} 
 
+# 💡 [최종 고도화] 범용적 볼륨 판독 지침이 이식된 시스템 프롬프트
+system_prompt = """
+당신은 식당의 실체를 파헤치는 '글로벌 리스크 프로파일러 AI'입니다. 
+제공된 메타데이터와 리뷰 텍스트를 바탕으로 엄격하게 분석하십시오.
+
+[리뷰 볼륨 판독 지침 - 범용 표준]
+1. 50개 미만 (미검증): 데이터 신뢰도가 낮음. 평점이 높아도 '신규 또는 지인 기반' 가능성을 염두에 두고 보수적으로 평가할 것.
+2. 500개 이상 (검증됨): 표본의 안정성이 확보됨. 평점이 4.0 이상이면 실패 확률이 극히 낮은 '강력 추천' 식당.
+3. 1,000개 이상 (랜드마크): 글로벌 기준 대형 맛집. 이 규모에서 평점 3.5점 이상만 유지해도 '상위 10%의 검증된 맛집'으로 인정할 것.
+4. 위험 경보: 리뷰가 500개 이상임에도 평점이 3.0 미만이라면, 서비스나 위생에 '고질적이고 치명적인 문제'가 있는 것으로 규정할 것.
+
+[데이터 분석 규칙]
+- 추측 금지: 맛, 가성비, 서비스, 시간, 위생 항목 중 리뷰 텍스트에서 근거를 찾을 수 없는 경우, 점수 대신 반드시 "데이터 부족"으로 기재하십시오.
+- 네거티브 필터링: 위생, 식중독, 사기적 가격 등 치명적 위협은 요약문 최상단에 [위험] 태그와 함께 기재하십시오.
+- 마케팅 제외: '재방문' 등 상투적 광고 멘트는 가점 요인에서 배제하십시오.
+
+[출력 형식 - JSON]
+{
+    "realScore": 1.0~5.0 (종합 평점),
+    "aiSummary": "지뢰 여부 및 핵심 요약 (3줄 이내)",
+    "details": {
+        "taste": "1~5 또는 데이터 부족",
+        "value": "1~5 또는 데이터 부족",
+        "service": "1~5 또는 데이터 부족",
+        "time": "1~5 또는 데이터 부족",
+        "hygiene": "1~5 또는 데이터 부족"
+    }
+}
+"""
+
 app = FastAPI()
 
 app.add_middleware(
@@ -44,20 +74,16 @@ def search_places(q: str, request: Request):
         result = search_and_get_reviews(q)
         if not result: return []
 
-        formatted_result = {
+        return [{
             "id": result["name"],
             "place_name": result["name"],
-            "name": result["name"],
             "address_name": result["address"],
             "road_address_name": result["address"],
-            "address": result["address"],
-            "place_url": result["name"], 
-            "category_name": "음식점",
-            "phone": "Google Maps"
-        }
-        return [formatted_result]
-    except:
-        return []
+            "place_url": result["name"],
+            "category_name": "식당",
+            "phone": ""
+        }]
+    except: return []
 
 @app.post("/api/analyze")
 async def analyze_place(request: Request):
@@ -65,49 +91,42 @@ async def analyze_place(request: Request):
     client_ip = request.client.host
     try:
         data = await request.json()
-    except:
-        data = {}
+    except: data = {}
 
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
     lang = data.get("lang") or "ko"
 
     if not query:
-        raise HTTPException(status_code=422, detail="대상 누락")
+        raise HTTPException(status_code=422, detail="Query missing")
 
     cache = load_cache()
     if query in cache:
         cached_item = cache[query]
-        # 💡 [변경됨] 캐시 유지 기간을 7일에서 30일(한 달)로 늘렸습니다.
         if datetime.now() - datetime.strptime(cached_item["date"], "%Y-%m-%d") < timedelta(days=30):
-            print(f"📦 [캐시 사용] '{query}'의 데이터를 파일에서 불러옵니다.")
             return cached_item["result"]
 
     place_info = search_and_get_reviews(query)
     if not place_info:
-        raise HTTPException(status_code=404, detail="정보 없음")
+        raise HTTPException(status_code=404, detail="No info")
 
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel(
+            model_name='gemini-1.5-flash',
+            system_instruction=system_prompt,
+            generation_config={"temperature": 0.1, "response_mime_type": "application/json"}
+        )
         
-        prompt = f"""
-        식당 '{place_info['name']}'의 리뷰를 분석해서 진짜 정보를 JSON으로만 답해.
-        {{
-            "realScore": 1.0~5.0,
-            "aiSummary": "3줄 요약",
-            "details": {{ "taste": 1~5, "value": 1~5, "service": 1~5, "time": 1~5 }}
-        }}
-        리뷰 내용: {" ".join(place_info['reviews'])}
+        # 💡 전체 리뷰 수와 평점 데이터를 AI에게 명확히 전달
+        user_prompt = f"""
+        식당명: {place_info['name']}
+        공식 평점: {place_info['rating']}
+        결과 언어: {lang}
+        리뷰 내용:
+        {" ".join(place_info['reviews'])}
         """
         
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        
-        # 💡 [필살기] AI 대답에서 JSON 부분만 강제로 추출 (500 에러 방지)
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            ai_data = json.loads(match.group())
-        else:
-            raise ValueError("AI 응답에서 JSON을 찾을 수 없음")
+        response = model.generate_content(user_prompt)
+        ai_data = json.loads(re.search(r'\{.*\}', response.text, re.DOTALL).group())
         
         final_result = {
             **ai_data, 
@@ -120,8 +139,8 @@ async def analyze_place(request: Request):
         save_cache(cache)
         return final_result
     except Exception as e:
-        print(f"❌ AI 분석 에러: {str(e)}")
-        raise HTTPException(status_code=500, detail="분석 실패")
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail="Analysis failed")
 
 if __name__ == "__main__":
     import uvicorn
