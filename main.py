@@ -17,7 +17,6 @@ last_queries = {}
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# 캐시 함수 생략 (기존과 동일)
 def load_cache():
     try:
         if os.path.exists(DB_FILE):
@@ -26,7 +25,8 @@ def load_cache():
     return {}
 
 def save_cache(cache_data):
-    with open(DB_FILE, "w", encoding="utf-8") as f: json.dump(cache_data, f, ensure_ascii=False, indent=4)
+    with open(DB_FILE, "w", encoding="utf-8") as f: 
+        json.dump(cache_data, f, ensure_ascii=False, indent=4)
 
 @app.get("/api/search")
 def search_places(q: str, request: Request):
@@ -37,16 +37,21 @@ def search_places(q: str, request: Request):
         result = search_and_get_reviews(q)
         if not result: return []
         
-        # 💡 [UI 원복] 절대 다른 글자를 섞지 않고 '순수한 이름'만 보냅니다.
+        # 💡 [해결] 프론트엔드가 어떤 키를 찾든 대응하도록 "다 넣어주는" 리턴 방식
+        # 가게 이름(name)을 최우선으로 배치
         return [{
-            "id": result["name"],
-            "place_name": result["name"],      # 프론트엔드가 찾는 핵심 키
-            "address_name": result["address"],
-            "road_address_name": result["address"],
-            "place_url": result["name"],       # 분석 요청 시 사용됨
-            "category_name": "식당"
+            "id": result.get("name"),
+            "place_name": result.get("name"),        # 프론트엔드 관례 1
+            "name": result.get("name"),              # 구글/표준 관례 2
+            "address_name": result.get("address"),   # 카카오 맵 템플릿 관례
+            "road_address_name": result.get("address"),
+            "address": result.get("address"),        # 일반 변수 관례
+            "place_url": result.get("name"),         # 식별자
+            "category_name": "음식점"
         }]
-    except: return []
+    except Exception as e:
+        print(f"🚨 검색 API 에러: {e}")
+        return []
 
 @app.post("/api/analyze")
 async def analyze_place(request: Request):
@@ -69,46 +74,62 @@ async def analyze_place(request: Request):
     if not place_info: raise HTTPException(status_code=404)
 
     try:
-        # 💡 [필살기] 404 에러 방지: 베타 설정(JSON 모드 등)을 모두 제거하고 표준 v1 모델 호출
+        # 💡 [필살기] 404 에러 원천 차단: 'JSON 모드'를 빼고 표준 통로를 탑니다.
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # 프롬프트에 모든 지침을 합쳐서 보냄 (v1beta 충돌 원천 차단)
         prompt = f"""
-        식당 정보: {place_info['name']} (평점: {place_info['rating']}, 리뷰수: {place_info.get('user_ratings_total', 0)})
-        
-        [지침]
-        당신은 '글로벌 리스크 프로파일러'입니다. 리뷰를 분석해 진짜 평점을 매기세요.
-        - 500개 이상 리뷰/4.0 평점 이상: 강력 추천.
-        - 위생, 불친절, 바가지 언급 시 무조건 [위험] 경고.
-        - 정보가 없는 항목은 반드시 "데이터 부족"으로 표기.
-        
-        반드시 아래 JSON 형식으로만 답변하세요:
+        식당: {place_info['name']} (평점: {place_info['rating']}, 리뷰수: {place_info.get('user_ratings_total', 0)})
+        결과 언어: {lang}
+
+        [지뢰 탐지 지침]
+        1. 볼륨 판독: 500개 이상/4.0점 이상이면 강력 추천. 1,000개 이상/3.5점 이상이면 랜드마크 맛집.
+        2. 지뢰 경고: 위생, 식중독, 불친절, 바가지 언급 시 [위험] 경고.
+        3. 데이터 정직성: 특정 항목(맛, 가성비, 서비스, 시간, 위생) 근거 없으면 반드시 "데이터 부족" 표기.
+        4. 마케팅 배제: 상투적인 재방문 멘트는 무시.
+
+        반드시 아래의 JSON 형식을 지켜서 답변하세요:
         {{
             "realScore": 1.0~5.0,
-            "aiSummary": "요약",
-            "details": {{ "taste": "1~5/데이터 부족", "value": "1~5/데이터 부족", "service": "1~5/데이터 부족", "time": "1~5/데이터 부족", "hygiene": "1~5/데이터 부족" }}
+            "aiSummary": "요약 3줄 이내",
+            "details": {{
+                "taste": "1~5 또는 데이터 부족",
+                "value": "1~5 또는 데이터 부족",
+                "service": "1~5 또는 데이터 부족",
+                "time": "1~5 또는 데이터 부족",
+                "hygiene": "1~5 또는 데이터 부족"
+            }}
         }}
-        
-        리뷰 내용:
+
+        리뷰 데이터:
         {" ".join(place_info['reviews'])}
         """
-        
-        # generation_config에서 response_mime_type을 제거하여 v1beta 강제 호출을 막음
+
+        # JSON 모드를 해제하여 v1beta 접속을 방지함
         response = model.generate_content(prompt)
         
-        # 텍스트에서 JSON 추출
+        # 💡 정규표현식으로 텍스트 응답 중 JSON 블록만 추출
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        if not match:
+            raise ValueError("AI 응답에서 JSON을 찾을 수 없습니다.")
+            
         ai_data = json.loads(match.group())
         
-        final_result = {**ai_data, "name": place_info['name'], "address": place_info['address'], "rating": place_info['rating']}
+        final_result = {
+            **ai_data, 
+            "name": place_info['name'], 
+            "address": place_info['address'], 
+            "rating": place_info['rating']
+        }
+        
         cache[query] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
         save_cache(cache)
         return final_result
         
     except Exception as e:
-        print(f"❌ 분석 실패: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"❌ 분석 최종 실패: {e}")
+        raise HTTPException(status_code=500, detail="AI 분석 서버 오류")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
