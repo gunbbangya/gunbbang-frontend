@@ -14,6 +14,7 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 DB_FILE = "analysis_cache.json"
 last_queries = {} 
 
+# 파운더님의 '지뢰 탐지' 철학 프롬프트
 analysis_prompt_base = """
 당신은 식당의 실체를 파헤치는 '글로벌 리스크 프로파일러 AI'입니다. 
 
@@ -25,8 +26,8 @@ analysis_prompt_base = """
 
 [분석 규칙]
 1. 치명적 단점(위생, 식중독, 불친절, 바가지) 발견 시 [위험] 경고 우선.
-2. 근거 없는 항목은 반드시 점수 대신 "데이터 부족"으로 기재할 것.
-3. '재방문' 등 상투적인 광고 멘트는 배제.
+2. 데이터 부재 시 처리: 근거가 없으면 반드시 점수 대신 "데이터 부족"으로 기재할 것.
+3. 재방문 멘트 등 상투적인 광고 멘트는 배제.
 
 [출력 형식 - JSON]
 {
@@ -58,16 +59,16 @@ def search_places(q: str, request: Request):
         result = search_and_get_reviews(q)
         if not result: return []
         
-        # 💡 [UI 개선] 이름이 앞에 오도록 아예 합쳐서 보냅니다.
-        display_name = f"[{result['name']}] {result['address']}"
+        # 💡 [UI 개선] 이제 목록에 "[가게이름] 주소" 형태로 확실히 보입니다.
+        display_name = f"[{result['name']}] {result.get('address', '주소 정보 없음')}"
         
         return [{
             "id": result["name"],
-            "place_name": display_name,         # 이제 화면에 "[가게이름] 주소"로 뜹니다.
+            "place_name": display_name,         # 프론트가 읽는 이름
             "address_name": result["address"],
             "road_address_name": result["address"],
             "place_url": result["name"],
-            "category_name": "식당"
+            "category_name": "음식점"
         }]
     except: return []
 
@@ -93,35 +94,39 @@ async def analyze_place(request: Request):
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404, detail="No info")
 
-    # 💡 [Gemini 에러 방어 로직] 
-    model_names = ['gemini-1.5-flash', 'gemini-pro'] # 1.5가 안되면 pro로 시도
+    # 💡 [필살기] 404 모델 에러를 피하기 위한 순차적 시도
+    # 환경에 따라 1.5-flash가 안 될 경우 pro로 즉시 전환합니다.
+    target_models = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
     
-    for m_name in model_names:
+    for model_name in target_models:
         try:
-            print(f"🤖 {m_name} 모델로 분석 시도 중...")
-            model = genai.GenerativeModel(m_name)
+            print(f"🤖 {model_name} 모델로 분석 시도...")
+            model = genai.GenerativeModel(model_name)
             
-            full_prompt = f"{analysis_prompt_base}\n\n식당명: {place_info['name']}\n공식 평점: {place_info['rating']}\n전체 리뷰 수: {place_info.get('user_ratings_total', 0)}\n결과 언어: {lang}\n리뷰 내용: {' '.join(place_info['reviews'])}"
+            user_prompt = f"{analysis_prompt_base}\n\n식당명: {place_info['name']}\n공식 평점: {place_info['rating']}\n전체 리뷰 수: {place_info.get('user_ratings_total', 0)}\n결과 언어: {lang}\n리뷰 내용: {' '.join(place_info['reviews'])}"
             
             response = model.generate_content(
-                full_prompt,
+                user_prompt,
                 generation_config={"temperature": 0.1, "response_mime_type": "application/json"}
             )
             
+            # JSON 추출 및 파싱
             ai_data = json.loads(re.search(r'\{.*\}', response.text, re.DOTALL).group())
             final_result = {**ai_data, "name": place_info['name'], "address": place_info['address'], "rating": place_info['rating']}
             
             cache[query] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
             save_cache(cache)
-            return final_result # 성공 시 즉시 반환
+            return final_result
             
         except Exception as e:
-            print(f"⚠️ {m_name} 실패: {e}")
-            continue # 다음 모델로 재시도
-            
-    # 모든 모델이 실패했을 경우
-    raise HTTPException(status_code=500, detail="모든 AI 모델 호출 실패. 라이브러리 버전을 확인하세요.")
+            print(f"⚠️ {model_name} 실패: {e}")
+            continue # 실패하면 다음 모델로 넘어감
+
+    # 모든 모델이 실패했을 경우의 최종 에러
+    raise HTTPException(status_code=500, detail="AI 모델 호출에 실패했습니다. API 키 권한을 확인하세요.")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    # Render가 지정하는 포트에 맞게 실행 (기본 10000)
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
