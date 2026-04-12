@@ -24,45 +24,52 @@ WINDOW_SECONDS = 60
 
 def get_dynamic_prompt(lang, place_info):
     if lang == "en":
-        # 영어 모드: 비평가 정체성 강화
-        instruction = "You are a 'Cold-blooded Global Restaurant Critic'. Be extremely skeptical and strict with scores."
+        instruction = "You are a 'Cold-blooded Global Restaurant Critic' and 'Fake Review Detective'. Your goal is to expose scores inflated by promotional events."
         guidelines = """
+        [Detection: Review Events & Fake Patterns]
+        1. Identify phrases like "got a free drink/side", "event participation", "review for service".
+        2. Contextual Detection: Even without 'event' keywords, if a 5-star review only praises "kindness" or "cleanliness" without any specific details about the food (taste, texture, ingredients), treat it as a high-probability fake/promotional pattern.
+        3. Suspicious 5.0 stars: Extremely short reviews or emoji-only reviews are considered zero-value data.
+        4. Weighting: Give 2x weight to 1~3 star reviews that describe specific issues (hygiene, attitude, price).
+        5. Calculate 'eventProbability' (0~100%): High probability if reviews lack substance or focus solely on non-food factors.
+        
         [Strict Scoring Rules]
-        1. Base Score: Start from 3.0. Do not give 4.5+ unless it's truly flawless.
-        2. Strict Deductions: 
-           - Rude service or Hygiene issues: -1.5 points immediately.
-           - Overpriced or Long wait: -1.0 point.
-        3. Hard Ceiling: If the 'aiSummary' mentions ANY critical negatives (service, hygiene, bait-and-switch), 'realScore' MUST NOT exceed 3.5.
-        4. Consistency: If your summary is critical, the 'details' scores must be low. No "Great food but 1 star" or "Bad food but 5 stars".
-        5. Translation: Translate 'Name' and 'Address' into English.
+        1. Base Score: 3.0. Do not exceed 4.0 unless it's a legendary spot.
+        2. Deductions: Rude service/Hygiene (-1.5), Overpriced (-1.0).
+        3. Hard Ceiling: If 'eventProbability' > 70%, the 'realScore' MUST NOT exceed 2.9 regardless of other factors.
         """
         json_format = """
         {
             "translatedName": "English Name",
             "translatedAddress": "English Address",
             "realScore": 1.0~5.0,
-            "aiSummary": "Critical summary",
+            "eventProbability": 0~100,
+            "aiSummary": "Critical summary focusing on fake patterns and food quality",
             "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" }
         }
         """
     else:
-        # 한국어 모드: '까칠한 프로파일러' 주입
-        instruction = "당신은 식당의 광고성 리뷰를 걸러내고 단점을 집요하게 파헤치는 '냉혹한 미식 비평가'입니다."
+        instruction = "당신은 광고성 리뷰를 걸러내고 조작된 평점을 파괴하는 '냉혹한 미식 프로파일러'입니다."
         guidelines = """
+        [리뷰 이벤트 및 조작 패턴 감지]
+        1. 핵심 키워드 감시: '서비스 받았어요', '이벤트 참여', '음료수 서비스', '사진 리뷰 약속' 등의 문구가 보이면 무조건 'eventProbability'를 높이세요.
+        2. 맥락적 정황 포착: '이벤트'라는 직접적 단어가 없더라도, 음식(맛, 식감, 양)에 대한 구체적 묘사 없이 "사장님이 친절해요", "가게가 예뻐요" 등 부차적인 칭찬만 나열된 5점 리뷰는 보상형 리뷰일 확률이 매우 높으므로 'eventProbability'에 적극 반영하세요.
+        3. 영혼 없는 5점: "맛있어요", "최고예요" 등 구체적인 설명 없이 이모티콘만 있거나 너무 짧은 5점 리뷰는 '리뷰 이벤트' 정황으로 간주합니다.
+        4. 신뢰도 가중치: 사진이 없거나 짧은 5점보다, 단점을 구체적으로 지적한 1~3점 리뷰에 2배의 가중치를 두어 점수를 깎으세요.
+        5. 'eventProbability' 산출: 0~100% 사이의 정수로, 리뷰 이벤트가 의심되는 정도를 계산하세요.
+
         [엄격한 채점 기준]
-        1. 기본 점수: 3.0점에서 시작하세요. 4.0점 이상은 대한민국 상위 1% 식당에만 부여합니다.
-        2. 감점 지침: 
-           - '불친절', '위생 문제', '바가지' 언급 시 무조건 해당 항목 1~2점 및 총점 -1.5점 감점.
-           - '웨이팅 너무 김', '비쌈' 언급 시 -1.0점 감점.
-        3. 점수 상한선: 요약문에 부정적인 팩트(불친절, 위생, 맛의 기복 등)가 포함되어 있다면 'realScore'는 절대로 3.5점을 넘길 수 없습니다.
-        4. 일관성: 요약문에서 욕을 했다면 점수도 낮아야 합니다. 유저가 '글은 나쁜데 점수는 왜 높지?'라고 의심하지 않게 하세요.
+        1. 기본 점수: 3.0점. 4.0점 이상은 대한민국 상위 1% 식당에만 부여합니다.
+        2. 점수 상한선: 'eventProbability'가 70% 이상이면 'realScore'는 무조건 2.9점 이하로 강제 고정합니다.
+        3. 감점: 불친절/위생(-1.5점), 웨이팅/비쌈(-1.0점).
         """
         json_format = """
         {
             "translatedName": "가게 이름",
             "translatedAddress": "가게 주소",
             "realScore": 1.0~5.0,
-            "aiSummary": "냉정한 요약",
+            "eventProbability": 0~100,
+            "aiSummary": "리뷰 이벤트 정황을 포함한 냉정한 분석",
             "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" }
         }
         """
