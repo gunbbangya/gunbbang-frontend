@@ -1,20 +1,33 @@
 import os
 import json
 import re
-import time  # 💡 추가됨
-from collections import defaultdict  # 💡 추가됨
+import time
+from collections import defaultdict
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse # 💡 추가됨
+from fastapi.responses import JSONResponse
 from scraper import search_and_get_reviews 
 import google.generativeai as genai
 from dotenv import load_dotenv
+from pymongo import MongoClient  # 💡 MongoDB 도구 추가됨!
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-DB_FILE = "analysis_cache.json"
+# ==========================================
+# 💡 MongoDB 클라우드 연결 설정
+# ==========================================
+MONGO_URI = os.getenv("MONGO_URI")
+try:
+    client = MongoClient(MONGO_URI)
+    db = client["jjin_view_db"]
+    collection = db["places_cache"]
+    print("✅ MongoDB 클라우드 연결 성공!")
+except Exception as e:
+    print(f"🚨 MongoDB 연결 실패 (URI를 확인하세요): {e}")
+    collection = None
+
 last_queries = {} 
 
 # --- Rate Limit 설정 ---
@@ -22,6 +35,7 @@ user_requests = defaultdict(list)
 RATE_LIMIT = 10 
 WINDOW_SECONDS = 60
 
+# --- 동적 프롬프트 생성 ---
 def get_dynamic_prompt(lang, place_info):
     if lang == "en":
         instruction = "You are a 'Cold-blooded Global Restaurant Critic' and 'Fake Review Detective'. Your goal is to expose scores inflated by promotional events."
@@ -107,16 +121,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def load_cache():
-    try:
-        if os.path.exists(DB_FILE):
-            with open(DB_FILE, "r", encoding="utf-8") as f: return json.load(f)
-    except: pass
-    return {}
-
-def save_cache(cache_data):
-    with open(DB_FILE, "w", encoding="utf-8") as f: json.dump(cache_data, f, ensure_ascii=False, indent=4)
-
 @app.get("/api/search")
 def search_places(q: str, request: Request):
     global last_queries
@@ -145,20 +149,35 @@ async def analyze_place(request: Request):
     except: data = {}
 
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
-    
-    # 💡 [보안] 100자 제한 로직의 올바른 위치
     if query:
         query = query[:100]
         
     lang = data.get("lang") or "ko"
-    cache = load_cache()
-    cache_key = f"{query}_{lang}"
     
-    if cache_key in cache:
-        cached_item = cache[cache_key]
-        if datetime.now() - datetime.strptime(cached_item["date"], "%Y-%m-%d") < timedelta(days=30):
-            return cached_item["result"]
+    # 💡 [핵심 파트 1] 클라우드 DB에서 먼저 찾기 (0.1초 컷!)
+    if collection is not None:
+        # 이름으로 몽고DB 검색
+        cached_item = collection.find_one({"name": query})
+        
+        if cached_item:
+            # Case 1: db_builder.py가 카카오맵에서 미리 모아둔 데이터일 경우
+            if "analysis" in cached_item:
+                print(f"⚡ [DB 적중] '{query}' - 수집 공장에서 모아둔 데이터를 즉시 반환!")
+                return {
+                    **cached_item["analysis"],
+                    "name": cached_item.get("name", query),
+                    "address": cached_item.get("address", ""),
+                    "rating": 0
+                }
+            # Case 2: 이전에 누군가 실시간으로 검색해서 저장된 데이터일 경우
+            elif "result" in cached_item:
+                cache_date = datetime.strptime(cached_item["date"], "%Y-%m-%d")
+                if datetime.now() - cache_date < timedelta(days=30):
+                    print(f"⚡ [DB 적중] '{query}' - 최근 30일 내 검색 기록을 즉시 반환!")
+                    return cached_item["result"]
 
+    # 💡 [핵심 파트 2] DB에 없으면 기존처럼 실시간 구글 검색 + 제미나이 분석
+    print(f"🔍 [실시간 분석] '{query}' (DB에 없으므로 AI를 가동합니다)")
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
 
@@ -178,8 +197,17 @@ async def analyze_place(request: Request):
                     "address": ai_data.get("translatedAddress") or place_info['address'], 
                     "rating": place_info['rating']
                 }
-                cache[cache_key] = {"date": datetime.now().strftime("%Y-%m-%d"), "result": final_result}
-                save_cache(cache)
+                
+                # 💡 [핵심 파트 3] 실시간 분석 결과를 클라우드 DB에 영구 저장!
+                if collection is not None:
+                    document = {
+                        "name": query,
+                        "date": datetime.now().strftime("%Y-%m-%d"),
+                        "result": final_result
+                    }
+                    collection.update_one({"name": query}, {"$set": document}, upsert=True)
+                    print(f"💾 [DB 저장] '{query}' 분석 결과를 클라우드에 영구 저장했습니다.")
+                
                 return final_result
         except: continue
     raise HTTPException(status_code=500, detail="분석 실패")
