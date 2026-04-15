@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from scraper import search_and_get_reviews 
 import google.generativeai as genai
 from dotenv import load_dotenv
-from pymongo import MongoClient  # 💡 MongoDB 도구 추가됨!
+from pymongo import MongoClient  # 💡 MongoDB 도구
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -35,7 +35,7 @@ user_requests = defaultdict(list)
 RATE_LIMIT = 10 
 WINDOW_SECONDS = 60
 
-# --- 동적 프롬프트 생성 ---
+# --- 동적 프롬프트 생성 (구글 데이터 맞춤형 - 리뷰어 성향 삭제) ---
 def get_dynamic_prompt(lang, place_info):
     if lang == "en":
         instruction = "You are a 'Cold-blooded Global Restaurant Critic' and 'Fake Review Detective'. Your goal is to expose scores inflated by promotional events."
@@ -154,30 +154,32 @@ async def analyze_place(request: Request):
         
     lang = data.get("lang") or "ko"
     
-    # 💡 [핵심 파트 1] 클라우드 DB에서 먼저 찾기 (0.1초 컷!)
+    # 💡 [핵심 파트 1] 클라우드 DB에서 먼저 찾기
     if collection is not None:
-        # 이름으로 몽고DB 검색
         cached_item = collection.find_one({"name": query})
         
         if cached_item:
-            # Case 1: db_builder.py가 카카오맵에서 미리 모아둔 데이터일 경우
-            if "analysis" in cached_item:
-                print(f"⚡ [DB 적중] '{query}' - 수집 공장에서 모아둔 데이터를 즉시 반환!")
+            # 1. db_builder.py가 카카오맵에서 미리 모아둔 데이터(analysis_ko, analysis_en)
+            builder_cache_key = f"analysis_{lang}"
+            if builder_cache_key in cached_item and cached_item[builder_cache_key]:
+                print(f"⚡ [DB 적중] '{query}' - 수집 공장에서 모아둔 '{lang}' 데이터를 즉시 반환!")
                 return {
-                    **cached_item["analysis"],
+                    **cached_item[builder_cache_key],
                     "name": cached_item.get("name", query),
                     "address": cached_item.get("address", ""),
                     "rating": 0
                 }
-            # Case 2: 이전에 누군가 실시간으로 검색해서 저장된 데이터일 경우
-            elif "result" in cached_item:
+                
+            # 2. 이전에 누군가 실시간으로 검색해서 저장된 구글 데이터(result_ko, result_en)
+            realtime_cache_key = f"result_{lang}"
+            if realtime_cache_key in cached_item and cached_item[realtime_cache_key]:
                 cache_date = datetime.strptime(cached_item["date"], "%Y-%m-%d")
                 if datetime.now() - cache_date < timedelta(days=30):
-                    print(f"⚡ [DB 적중] '{query}' - 최근 30일 내 검색 기록을 즉시 반환!")
-                    return cached_item["result"]
+                    print(f"⚡ [DB 적중] '{query}' - 최근 30일 내 실시간 검색 기록('{lang}')을 즉시 반환!")
+                    return cached_item[realtime_cache_key]
 
-    # 💡 [핵심 파트 2] DB에 없으면 기존처럼 실시간 구글 검색 + 제미나이 분석
-    print(f"🔍 [실시간 분석] '{query}' (DB에 없으므로 AI를 가동합니다)")
+    # 💡 [핵심 파트 2] 실시간 분석
+    print(f"🔍 [실시간 분석] '{query}' ({lang} 버전 DB 없음. 구글 리뷰로 AI 가동합니다)")
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
 
@@ -198,15 +200,15 @@ async def analyze_place(request: Request):
                     "rating": place_info['rating']
                 }
                 
-                # 💡 [핵심 파트 3] 실시간 분석 결과를 클라우드 DB에 영구 저장!
+                # 💡 [핵심 파트 3] 실시간 분석 결과를 언어별로 클라우드 DB에 영구 저장
                 if collection is not None:
-                    document = {
+                    update_data = {
                         "name": query,
                         "date": datetime.now().strftime("%Y-%m-%d"),
-                        "result": final_result
+                        f"result_{lang}": final_result
                     }
-                    collection.update_one({"name": query}, {"$set": document}, upsert=True)
-                    print(f"💾 [DB 저장] '{query}' 분석 결과를 클라우드에 영구 저장했습니다.")
+                    collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
+                    print(f"💾 [DB 저장] '{query}' 실시간 분석 결과({lang})를 영구 저장했습니다.")
                 
                 return final_result
         except: continue
