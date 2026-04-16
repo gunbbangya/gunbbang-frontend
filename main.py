@@ -11,6 +11,8 @@ from scraper import search_and_get_reviews
 import google.generativeai as genai
 from dotenv import load_dotenv
 from pymongo import MongoClient  # 💡 MongoDB 도구
+import certifi
+
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -20,7 +22,7 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 # ==========================================
 MONGO_URI = os.getenv("MONGO_URI")
 try:
-    client = MongoClient(MONGO_URI)
+    client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
     db = client["jjin_view_db"]
     collection = db["places_cache"]
     print("✅ MongoDB 클라우드 연결 성공!")
@@ -111,7 +113,9 @@ async def limit_requests(request: Request, call_next):
 # --- 미들웨어: CORS ---
 ALLOWED_ORIGINS = [
     "https://gunbbang-frontend.vercel.app", 
-    "http://localhost:3000",                
+    "http://localhost:3000",        
+    "https://zzinview.app",        
+    "https://www.zzinview.app"
 ]
 app.add_middleware(
     CORSMiddleware,
