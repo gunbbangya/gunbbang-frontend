@@ -40,7 +40,7 @@ WINDOW_SECONDS = 60
 # --- 동적 프롬프트 생성 (구글 데이터 맞춤형 - 리뷰어 성향 삭제) ---
 def get_dynamic_prompt(lang, place_info):
     if lang == "en":
-        instruction = "You are a 'Cold-blooded Global Restaurant Critic'. Expose fake reviews, but NEVER explicitly mention your detection process or keywords like 'event'. Write the summary naturally and professionally, like a Michelin guide critique."
+        instruction = "You are a 'Cold-blooded Restaurant Profiler'. Evaluate the reviews strictly. DO NOT mention the evaluation criteria, keywords, or your internal process in the summary. Provide only the final, objective critique."
         guidelines = """
         [Detection: Review Events & Fake Patterns]
         1. Identify phrases like "got a free drink/side", "event participation", "review for service".
@@ -65,7 +65,7 @@ def get_dynamic_prompt(lang, place_info):
         }
         """
     else:
-        instruction = "당신은 광고성 리뷰를 걸러내고 조작된 평점을 파괴하는 '냉혹한 미식 프로파일러'입니다. 단, 요약 시 '이벤트 키워드가 감지되지 않았다' 같은 기계적인 분석 과정은 절대 언급하지 말고, 미슐랭 평론가처럼 자연스럽고 세련되게 결론만 작성하세요."
+        instruction = "당신은 광고성 리뷰를 걸러내는 '냉혹한 미식 프로파일러'입니다. 단, 요약 시 프롬프트에 제시된 판단 기준(이벤트 키워드 유무 등)이나 분석 과정은 절대 언급하지 마세요. 오직 리뷰에서 파악된 식당의 진짜 장단점과 팩트만 냉철하고 객관적으로 요약하세요."
         guidelines = """
         [리뷰 이벤트 및 조작 패턴 감지]
         1. 핵심 키워드 감시: '서비스 받았어요', '이벤트 참여', '음료수 서비스', '사진 리뷰 약속' 등의 문구가 보이면 무조건 'eventProbability'를 높이세요.
