@@ -40,7 +40,7 @@ WINDOW_SECONDS = 60
 # --- 동적 프롬프트 생성 (구글 데이터 맞춤형 - 리뷰어 성향 삭제) ---
 def get_dynamic_prompt(lang, place_info):
     if lang == "en":
-        instruction = "You are a 'Cold-blooded Global Restaurant Critic' and 'Fake Review Detective'. Your goal is to expose scores inflated by promotional events."
+        instruction = "You are a 'Cold-blooded Global Restaurant Critic'. Expose fake reviews, but NEVER explicitly mention your detection process or keywords like 'event'. Write the summary naturally and professionally, like a Michelin guide critique."
         guidelines = """
         [Detection: Review Events & Fake Patterns]
         1. Identify phrases like "got a free drink/side", "event participation", "review for service".
@@ -65,7 +65,7 @@ def get_dynamic_prompt(lang, place_info):
         }
         """
     else:
-        instruction = "당신은 광고성 리뷰를 걸러내고 조작된 평점을 파괴하는 '냉혹한 미식 프로파일러'입니다."
+        instruction = "당신은 광고성 리뷰를 걸러내고 조작된 평점을 파괴하는 '냉혹한 미식 프로파일러'입니다. 단, 요약 시 '이벤트 키워드가 감지되지 않았다' 같은 기계적인 분석 과정은 절대 언급하지 말고, 미슐랭 평론가처럼 자연스럽고 세련되게 결론만 작성하세요."
         guidelines = """
         [리뷰 이벤트 및 조작 패턴 감지]
         1. 핵심 키워드 감시: '서비스 받았어요', '이벤트 참여', '음료수 서비스', '사진 리뷰 약속' 등의 문구가 보이면 무조건 'eventProbability'를 높이세요.
@@ -158,32 +158,43 @@ async def analyze_place(request: Request):
         
     lang = data.get("lang") or "ko"
     
-    # 💡 [핵심 파트 1] 클라우드 DB에서 먼저 찾기
+    # 💡 [포인트 1] 이 식당이 예전에 한 번이라도 검색된 적 있는지 기억해두기!
+    already_existed = False 
+    
     if collection is not None:
         cached_item = collection.find_one({"name": query})
         
         if cached_item:
-            # 1. db_builder.py가 카카오맵에서 미리 모아둔 데이터(analysis_ko, analysis_en)
+            already_existed = True # DB에 흔적이 있으니 최초 발견은 아님!
+            
+            # 1. 수집 공장(db_builder)이 모아둔 데이터
             builder_cache_key = f"analysis_{lang}"
             if builder_cache_key in cached_item and cached_item[builder_cache_key]:
-                print(f"⚡ [DB 적중] '{query}' - 수집 공장에서 모아둔 '{lang}' 데이터를 즉시 반환!")
                 return {
                     **cached_item[builder_cache_key],
                     "name": cached_item.get("name", query),
                     "address": cached_item.get("address", ""),
-                    "rating": 0
+                    "rating": 0,
+                    "isNewDiscovery": False  # 깃발 꽂지 마
                 }
                 
-            # 2. 이전에 누군가 실시간으로 검색해서 저장된 구글 데이터(result_ko, result_en)
+            # 2. 실시간 검색 기록 (30일 유효기간 체크 부활!)
             realtime_cache_key = f"result_{lang}"
             if realtime_cache_key in cached_item and cached_item[realtime_cache_key]:
                 cache_date = datetime.strptime(cached_item["date"], "%Y-%m-%d")
+                
                 if datetime.now() - cache_date < timedelta(days=30):
-                    print(f"⚡ [DB 적중] '{query}' - 최근 30일 내 실시간 검색 기록('{lang}')을 즉시 반환!")
-                    return cached_item[realtime_cache_key]
+                    # 30일 안 지났으면 바로 결과 보여주기
+                    print(f"⚡ [DB 적중] '{query}' - 최근 30일 내 검색 기록 반환!")
+                    result_data = cached_item[realtime_cache_key]
+                    result_data["isNewDiscovery"] = False # 깃발 꽂지 마
+                    return result_data
+                else:
+                    # 30일 지났으면? 아래 실시간 분석으로 내려보내서 최신화 진행!
+                    print(f"🔄 [DB 갱신] '{query}' - 30일이 지나 최신 데이터로 다시 검색합니다.")
 
-    # 💡 [핵심 파트 2] 실시간 분석
-    print(f"🔍 [실시간 분석] '{query}' ({lang} 버전 DB 없음. 구글 리뷰로 AI 가동합니다)")
+    # 💡 [포인트 2] 실시간 분석 (최초 발견이거나, 30일 지나서 갱신하는 경우)
+    print(f"🔍 [실시간 분석] '{query}' AI 가동 중...")
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
 
@@ -195,6 +206,7 @@ async def analyze_place(request: Request):
             prompt = get_dynamic_prompt(lang, place_info)
             response = model.generate_content(prompt)
             match = re.search(r'\{.*\}', response.text, re.DOTALL)
+            
             if match:
                 ai_data = json.loads(match.group())
                 final_result = {
@@ -204,7 +216,7 @@ async def analyze_place(request: Request):
                     "rating": place_info['rating']
                 }
                 
-                # 💡 [핵심 파트 3] 실시간 분석 결과를 언어별로 클라우드 DB에 영구 저장
+                # DB 업데이트
                 if collection is not None:
                     update_data = {
                         "name": query,
@@ -212,12 +224,83 @@ async def analyze_place(request: Request):
                         f"result_{lang}": final_result
                     }
                     collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
-                    print(f"💾 [DB 저장] '{query}' 실시간 분석 결과({lang})를 영구 저장했습니다.")
+                    print(f"💾 [DB 저장] '{query}' 최신 분석 결과 저장 완료!")
                 
+                # 💡 [포인트 3] 방금 돌린 게 진짜 아예 처음 찾은 거면 True, 30일 갱신인 거면 False!
+                final_result["isNewDiscovery"] = not already_existed 
                 return final_result
+                
         except: continue
+        
     raise HTTPException(status_code=500, detail="분석 실패")
 
+# ==========================================
+# 💡 [지도 기능 1] 3.5점 이상일 때 깃발 저장하기 (POST)
+# ==========================================
+@app.post("/api/map-flags")
+async def save_map_flag(request: Request):
+    if collection is None:
+        raise HTTPException(status_code=500, detail="DB 연결 실패")
+    
+    try:
+        data = await request.json()
+        name = data.get("name")
+        address = data.get("address")
+        score = data.get("score")
+
+        if not name or score is None:
+            raise HTTPException(status_code=400, detail="데이터 부족")
+
+        # DB의 'places_cache' 컬렉션에 분석 결과 형식으로 저장합니다.
+        # 이렇게 저장해야 나중에 GET으로 불러올 수 있습니다.
+        update_data = {
+            "name": name,
+            "address": address,
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "result_ko": {
+                "name": name,
+                "address": address,
+                "realScore": score
+            }
+        }
+        
+        collection.update_one({"name": name}, {"$set": update_data}, upsert=True)
+        print(f"💾 [DB 깃발 저장] {name} ({score}점)")
+        return {"status": "success"}
+    except Exception as e:
+        print("🚨 깃발 저장 에러:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# 💡 [지도 기능 2] DB에서 3.5점 이상 깃발들 가져오기 (GET)
+# ==========================================
+@app.get("/api/map-flags")
+def get_map_flags():
+    if collection is None:
+        return []
+        
+    flags = []
+    try:
+        # DB에서 분석 결과('result_ko')가 있는 데이터를 모두 찾습니다.
+        docs = collection.find({"result_ko": {"$exists": True}})
+        
+        for doc in docs:
+            data = doc["result_ko"]
+            score = data.get("realScore", 0)
+            
+            # 3.5점 이상인 것만 깃발 리스트에 담기
+            if score >= 3.5:
+                flags.append({
+                    "name": data.get("name", doc.get("name")),
+                    "address": data.get("address", doc.get("address")),
+                    "score": score
+                })
+        return flags
+    except Exception as e:
+        print("🚨 깃발 불러오기 에러:", e)
+        return []
+
+# 🚀 서버 실행 코드 (무조건 맨 마지막에 있어야 함!)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))

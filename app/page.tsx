@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Loader2, Search } from "lucide-react";
+import { Loader2, Search, Map } from "lucide-react";
+import MapOverlay from "./MapOverlay"; 
+import confetti from "canvas-confetti";
 
 type Lang = "ko" | "en";
 
@@ -39,8 +41,8 @@ const translations: Record<
     searchError: string;
     analyzeError: string;
     missingSummaryFallback: string;
-    fakeReviewTitle: string; // 💡 추가됨: 조작 경고 제목
-    fakeReviewDesc: string; // 💡 추가됨: 조작 경고 설명
+    fakeReviewTitle: string;
+    fakeReviewDesc: string;
   }
 > = {
   ko: {
@@ -134,7 +136,7 @@ export default function HomePage() {
   const [showResult, setShowResult] = useState(false);
   
   const [realScore, setRealScore] = useState<number | null>(null);
-  const [eventProb, setEventProb] = useState<number>(0); // 💡 이벤트 확률 상태 추가!
+  const [eventProb, setEventProb] = useState<number>(0);
   const [aiSummary, setAiSummary] = useState<string>("");
   const [chartDetails, setChartDetails] = useState<{
     taste: number;
@@ -150,7 +152,11 @@ export default function HomePage() {
 
   const [searchResults, setSearchResults] = useState<{ name: string; address: string }[]>([]);
 
-  // 💡 2.9점 이하일 때 발동하는 다크 테마 감지용 변수
+  // 💡 지도 열림 상태 & 깃발 수집 상태
+  const [isMapOpen, setIsMapOpen] = useState(false);
+  const [redFlags, setRedFlags] = useState(0);
+  const [goldFlags, setGoldFlags] = useState(0);
+
   const isCritical = showResult && realScore !== null && realScore <= 2.9;
 
   const setLanguage = (nextLang: Lang) => {
@@ -166,9 +172,17 @@ export default function HomePage() {
     try {
       const stored = localStorage.getItem(LANG_STORAGE_KEY);
       if (stored === "ko" || stored === "en") setLang(stored);
-    } catch {
-      // ignore
-    }
+    } catch { }
+  }, []);
+
+  // 💡 처음 사이트 들어왔을 때 내 깃발 개수 불러오기
+  useEffect(() => {
+    try {
+      const storedRed = localStorage.getItem("jjin-view:redFlags");
+      const storedGold = localStorage.getItem("jjin-view:goldFlags");
+      if (storedRed) setRedFlags(parseInt(storedRed, 10));
+      if (storedGold) setGoldFlags(parseInt(storedGold, 10));
+    } catch { }
   }, []);
 
   useEffect(() => {
@@ -194,7 +208,6 @@ export default function HomePage() {
         const response = await fetch(
           `https://gunbbang-backend.onrender.com/api/search?${params.toString()}`
         );
-
         if (!response.ok) throw new Error("Search response not ok");
 
         const data: { name: string; address: string }[] = await response.json();
@@ -227,10 +240,66 @@ export default function HomePage() {
         const data = await response.json();
         console.log("🤖 AI가 보낸 원본 데이터:", data);
 
-        setRealScore(data.realScore ?? data.score ?? 0);
-        setEventProb(data.eventProbability ?? 0); // 💡 이벤트 확률 데이터 저장!
+        const score = data.realScore ?? data.score ?? 0;
+        setRealScore(score);
+        setEventProb(data.eventProbability ?? 0);
         setAiSummary(data.aiSummary ?? translations[lang].missingSummaryFallback);
         setChartDetails(data.details ?? { taste: 0, value: 0, service: 0, time: 0 });
+
+        // 💡 1. [진짜 깃발 꽂기] 3.5점 이상이면 백엔드 DB에 저장
+        if (score >= 3.5) {
+          try {
+            const flagRes = await fetch("https://gunbbang-backend.onrender.com/api/map-flags", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: place.name,
+                address: place.address,
+                score: score,
+              }),
+            });
+            if (!flagRes.ok) throw new Error("Render 서버에 주소가 아직 없어요! (배포 필요)");
+            console.log("✅ 백엔드 DB에 깃발 저장 완료!");
+          } catch (err) {
+            console.error("❌ 깃발 저장 실패:", err);
+          }
+        }
+
+        // 💡 2. [최초 발견 애니메이션] 폭죽 팡팡!
+        if (data.isNewDiscovery) {
+          if (score >= 4.0) {
+            // 🏆 4.0 이상: 황금빛 대형 폭죽!
+            confetti({
+              particleCount: 200,
+              spread: 120,
+              origin: { y: 0.6 },
+              colors: ['#FFD700', '#FFA500', '#FF8C00'] // 황금/오렌지색
+            });
+            
+            setGoldFlags((prev) => {
+              const next = prev + 1;
+              localStorage.setItem("jjin-view:goldFlags", next.toString());
+              return next;
+            });
+            alert(`🎉 [최초 발견] 대박! 4.0점 이상 황금 깃발 맛집을 발견하셨습니다!`);
+            
+          } else if (score >= 3.5) {
+            // 🚩 3.5 이상: 빨간빛 축하 폭죽!
+            confetti({
+              particleCount: 100,
+              spread: 80,
+              origin: { y: 0.6 },
+              colors: ['#FF0000', '#FFFFFF', '#FFB6C1'] // 빨간색 계열
+            });
+            
+            setRedFlags((prev) => {
+              const next = prev + 1;
+              localStorage.setItem("jjin-view:redFlags", next.toString());
+              return next;
+            });
+            alert(`🚩 [최초 발견] 3.5점 이상! 빨간 깃발을 지도에 꽂았습니다!`);
+          }
+        }
 
         setIsAnalyzing(false);
         setShowResult(true);
@@ -245,259 +314,300 @@ export default function HomePage() {
   };
 
   return (
-    // 💡 메인 배경이 점수에 따라 스르륵 바뀝니다.
-    <main className={`min-h-screen flex items-center justify-center px-4 py-10 transition-colors duration-1000 ${isCritical ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
-      <div className="w-full max-w-xl">
-        <div className="mb-4 flex justify-end">
-          <div className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
-            <button
-              type="button"
-              onClick={() => setLanguage("ko")}
-              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                lang === "ko" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              KR
-            </button>
-            <button
-              type="button"
-              onClick={() => setLanguage("en")}
-              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                lang === "en" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"
-              }`}
-            >
-              EN
-            </button>
-          </div>
-        </div>
+    <>
+      {/* 💡 지도가 열려있으면 오버레이 렌더링 */}
+      {isMapOpen && <MapOverlay onClose={() => setIsMapOpen(false)} />}
 
-        {showResult ? (
-          // 💡 결과 카드도 다크 테마 적용
-          <section className={`rounded-2xl border shadow-lg overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-500 transition-colors ${isCritical ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-            
-            {/* 🚨 2.9점 이하일 때 나타나는 위험 경고 띠 */}
-            {isCritical && (
-              <div className="bg-red-900/80 py-1.5 text-center text-[10px] font-black tracking-[0.2em] text-red-100 uppercase animate-pulse">
-                Critical Low Score : Unreliable Place
+      <main className={`min-h-screen flex items-center justify-center px-4 py-10 transition-colors duration-1000 ${isCritical ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
+        <div className="w-full max-w-xl">
+          
+          {/* 💡 상단 바 (깃발 카운트 + 언어 + 지도 버튼) */}
+          <div className="mb-6 flex items-center justify-between">
+            {/* 내 수집품 (깃발 카운트) */}
+            <div className="flex gap-3 rounded-xl border border-slate-200 bg-white px-4 py-2 shadow-sm">
+              <span className="text-sm font-bold text-slate-700">🚩 {redFlags}</span>
+              <span className="text-sm font-bold text-slate-700">🏆 {goldFlags}</span>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setIsMapOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-blue-600"
+              >
+                <Map className="h-4 w-4" />
+                지도 보기
+              </button>
+
+              <div className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setLanguage("ko")}
+                  className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${lang === "ko" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                >
+                  KR
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLanguage("en")}
+                  className={`rounded-lg px-3 py-1 text-xs font-semibold transition ${lang === "en" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                >
+                  EN
+                </button>
               </div>
-            )}
+            </div>
+          </div>
 
-            <div className="px-4 pt-8 sm:px-6 sm:pt-10">
-              <div className="space-y-8">
-                <header className="space-y-4">
-                  <div>
-                    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border mb-4 ${isCritical ? 'bg-emerald-900/30 text-emerald-400 border-emerald-800' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>
-                      {translations[lang].statusDone}
-                    </span>
+          {showResult ? (
+            <section className={`rounded-2xl border shadow-lg overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-500 transition-colors ${isCritical ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+              {isCritical && (
+                <div className="bg-red-900/80 py-1.5 text-center text-[10px] font-black tracking-[0.2em] text-red-100 uppercase animate-pulse">
+                  Critical Low Score : Unreliable Place
+                </div>
+              )}
 
-                    {/* 🤨 리뷰 조작 확률이 70% 이상일 때 나타나는 배너 */}
-                    {eventProb >= 70 && (
-                      <div className="mb-6 rounded-xl border-2 border-dashed border-amber-500/50 bg-amber-950/20 p-4 animate-in zoom-in duration-500">
-                        <div className="flex items-start sm:items-center gap-3">
-                          <span className="text-3xl animate-bounce mt-1 sm:mt-0">🤨</span>
-                          <div>
-                            <p className="text-sm font-bold text-amber-500">
-                              {translations[lang].fakeReviewTitle} ({eventProb}%)
-                            </p>
-                            <p className="text-xs text-amber-200/70 mt-0.5 leading-relaxed break-keep">
-                              {translations[lang].fakeReviewDesc}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {typeof realScore === "number" && (
-                      <div className="flex flex-col gap-2">
-                        {realScore >= 4.0 && (
-                          <div className="self-start mb-1 inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-red-500 to-orange-500 px-3 py-1.5 text-sm font-extrabold text-white shadow-md animate-pulse">
-                            <span>🏆</span> {translations[lang].trophyText}
-                          </div>
-                        )}
-
-                        <div>
-                          <p className={`text-xs font-semibold mb-1 ${isCritical ? 'text-slate-400' : 'text-slate-500'}`}>
-                            {translations[lang].scoreTitle}
-                          </p>
-                          <p className={`text-5xl font-extrabold tracking-tight ${isCritical ? 'text-white' : 'text-slate-800'}`}>
-                            {realScore.toFixed(1)}{" "}
-                            <span className={`text-xl font-medium ${isCritical ? 'text-slate-600' : 'text-slate-300'}`}>
-                              {translations[lang].scoreOutOf}
-                            </span>
-                          </p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className={`rounded-xl border p-3 text-xs space-y-1.5 mt-4 ${isCritical ? 'bg-slate-800/50 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-100 text-slate-600'}`}>
-                    <p>👑 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>4.0+</strong> : {translations[lang].legend4}</p>
-                    <p>👍 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>3.0+</strong> : {translations[lang].legend3}</p>
-                    <p>🙂 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>2.5+</strong> : {translations[lang].legend25}</p>
-                  </div>
-                </header>
-
-                <section className="space-y-6">
-                  <div className={`rounded-2xl border px-4 py-4 text-sm ${isCritical ? 'bg-blue-950/30 border-blue-900/50 text-slate-300' : 'bg-blue-50/50 border-blue-100 text-slate-700'}`}>
-                    <p className={`mb-2 text-xs font-bold flex items-center gap-1 ${isCritical ? 'text-blue-400' : 'text-blue-600'}`}>
-                      <span>🤖</span> {translations[lang].aiSummaryTitle}
-                    </p>
-                    <p className="leading-relaxed">{aiSummary}</p>
-                  </div>
-
-                  {chartDetails && (
+              <div className="px-4 pt-8 sm:px-6 sm:pt-10">
+                <div className="space-y-8">
+                  <header className="space-y-4">
                     <div>
-                      <h3 className={`text-sm font-bold mb-3 ${isCritical ? 'text-slate-200' : 'text-slate-800'}`}>
-                        {translations[lang].detailsTitle}
-                      </h3>
-                      <div className={`space-y-3 rounded-2xl border p-5 shadow-sm ${isCritical ? 'bg-slate-800/50 border-slate-700' : 'bg-white border-slate-200'}`}>
-                        
-                        <div className="flex items-center text-sm">
-                          <span className={`w-20 font-medium ${isCritical ? 'text-slate-400' : 'text-slate-600'}`}>{translations[lang].categoryTaste}</span>
-                          <div className={`flex-1 h-2.5 rounded-full overflow-hidden ${isCritical ? 'bg-slate-700' : 'bg-slate-100'}`}>
-                            <div className="h-full bg-orange-500 rounded-full transition-all duration-1000" style={{ width: `${(chartDetails.taste / 5) * 100}%` }}></div>
-                          </div>
-                          <span className={`w-10 text-right font-semibold ${isCritical ? 'text-slate-300' : 'text-slate-500'}`}>{chartDetails.taste}/5</span>
-                        </div>
+                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border mb-4 ${isCritical ? 'bg-emerald-900/30 text-emerald-400 border-emerald-800' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>
+                        {translations[lang].statusDone}
+                      </span>
 
-                        <div className="flex items-center text-sm">
-                          <span className={`w-20 font-medium ${isCritical ? 'text-slate-400' : 'text-slate-600'}`}>{translations[lang].categoryValue}</span>
-                          <div className={`flex-1 h-2.5 rounded-full overflow-hidden ${isCritical ? 'bg-slate-700' : 'bg-slate-100'}`}>
-                            <div className="h-full bg-green-500 rounded-full transition-all duration-1000" style={{ width: `${(chartDetails.value / 5) * 100}%` }}></div>
+                      {eventProb >= 70 && (
+                        <div className="mb-6 rounded-xl border-2 border-dashed border-amber-500/50 bg-amber-950/20 p-4 animate-in zoom-in duration-500">
+                          <div className="flex items-start sm:items-center gap-3">
+                            <span className="text-3xl animate-bounce mt-1 sm:mt-0">🤨</span>
+                            <div>
+                              <p className="text-sm font-bold text-amber-500">
+                                {translations[lang].fakeReviewTitle} ({eventProb}%)
+                              </p>
+                              <p className="text-xs text-amber-200/70 mt-0.5 leading-relaxed break-keep">
+                                {translations[lang].fakeReviewDesc}
+                              </p>
+                            </div>
                           </div>
-                          <span className={`w-10 text-right font-semibold ${isCritical ? 'text-slate-300' : 'text-slate-500'}`}>{chartDetails.value}/5</span>
                         </div>
+                      )}
 
-                        <div className="flex items-center text-sm">
-                          <span className={`w-20 font-medium ${isCritical ? 'text-slate-400' : 'text-slate-600'}`}>{translations[lang].categoryService}</span>
-                          <div className={`flex-1 h-2.5 rounded-full overflow-hidden ${isCritical ? 'bg-slate-700' : 'bg-slate-100'}`}>
-                            <div className="h-full bg-blue-500 rounded-full transition-all duration-1000" style={{ width: `${(chartDetails.service / 5) * 100}%` }}></div>
+                      {typeof realScore === "number" && (
+                        <div className="flex flex-col gap-2">
+                          {realScore >= 4.0 && (
+                            <div className="self-start mb-1 inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-red-500 to-orange-500 px-3 py-1.5 text-sm font-extrabold text-white shadow-md animate-pulse">
+                              <span>🏆</span> {translations[lang].trophyText}
+                            </div>
+                          )}
+
+                          <div>
+                            <p className={`text-xs font-semibold mb-1 ${isCritical ? 'text-slate-400' : 'text-slate-500'}`}>
+                              {translations[lang].scoreTitle}
+                            </p>
+                            <p className={`text-5xl font-extrabold tracking-tight ${isCritical ? 'text-white' : 'text-slate-800'}`}>
+                              {realScore.toFixed(1)}{" "}
+                              <span className={`text-xl font-medium ${isCritical ? 'text-slate-600' : 'text-slate-300'}`}>
+                                {translations[lang].scoreOutOf}
+                              </span>
+                            </p>
                           </div>
-                          <span className={`w-10 text-right font-semibold ${isCritical ? 'text-slate-300' : 'text-slate-500'}`}>{chartDetails.service}/5</span>
                         </div>
+                      )}
+                    </div>
 
-                        <div className="flex items-center text-sm">
-                          <span className={`w-20 font-medium ${isCritical ? 'text-slate-400' : 'text-slate-600'}`}>{translations[lang].categoryTime}</span>
-                          <div className={`flex-1 h-2.5 rounded-full overflow-hidden ${isCritical ? 'bg-slate-700' : 'bg-slate-100'}`}>
-                            <div className="h-full bg-purple-500 rounded-full transition-all duration-1000" style={{ width: `${(chartDetails.time / 5) * 100}%` }}></div>
+                    <div className={`rounded-xl border p-3 text-xs space-y-1.5 mt-4 ${isCritical ? 'bg-slate-800/50 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-100 text-slate-600'}`}>
+                      <p>👑 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>4.0+</strong> : {translations[lang].legend4}</p>
+                      <p>👍 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>3.0+</strong> : {translations[lang].legend3}</p>
+                      <p>🙂 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>2.5+</strong> : {translations[lang].legend25}</p>
+                    </div>
+                  </header>
+
+                  <section className="space-y-6">
+                    <div className={`rounded-2xl border px-4 py-4 text-sm ${isCritical ? 'bg-blue-950/30 border-blue-900/50 text-slate-300' : 'bg-blue-50/50 border-blue-100 text-slate-700'}`}>
+                      <p className={`mb-2 text-xs font-bold flex items-center gap-1 ${isCritical ? 'text-blue-400' : 'text-blue-600'}`}>
+                        <span>🤖</span> {translations[lang].aiSummaryTitle}
+                      </p>
+                      <p className="leading-relaxed">{aiSummary}</p>
+                    </div>
+
+                    {chartDetails && (
+                      <div>
+                        <h3 className={`text-sm font-bold mb-3 ${isCritical ? 'text-slate-200' : 'text-slate-800'}`}>
+                          {translations[lang].detailsTitle}
+                        </h3>
+                        <div className={`space-y-3 rounded-2xl border p-5 shadow-sm ${isCritical ? 'bg-slate-800/50 border-slate-700' : 'bg-white border-slate-200'}`}>
+                          
+                          <div className="flex items-center text-sm">
+                            <span className={`w-20 font-medium ${isCritical ? 'text-slate-400' : 'text-slate-600'}`}>{translations[lang].categoryTaste}</span>
+                            <div className={`flex-1 h-2.5 rounded-full overflow-hidden ${isCritical ? 'bg-slate-700' : 'bg-slate-100'}`}>
+                              <div className="h-full bg-orange-500 rounded-full transition-all duration-1000" style={{ width: `${(chartDetails.taste / 5) * 100}%` }}></div>
+                            </div>
+                            <span className={`w-10 text-right font-semibold ${isCritical ? 'text-slate-300' : 'text-slate-500'}`}>{chartDetails.taste}/5</span>
                           </div>
-                          <span className={`w-10 text-right font-semibold ${isCritical ? 'text-slate-300' : 'text-slate-500'}`}>{chartDetails.time}/5</span>
-                        </div>
 
+                          <div className="flex items-center text-sm">
+                            <span className={`w-20 font-medium ${isCritical ? 'text-slate-400' : 'text-slate-600'}`}>{translations[lang].categoryValue}</span>
+                            <div className={`flex-1 h-2.5 rounded-full overflow-hidden ${isCritical ? 'bg-slate-700' : 'bg-slate-100'}`}>
+                              <div className="h-full bg-green-500 rounded-full transition-all duration-1000" style={{ width: `${(chartDetails.value / 5) * 100}%` }}></div>
+                            </div>
+                            <span className={`w-10 text-right font-semibold ${isCritical ? 'text-slate-300' : 'text-slate-500'}`}>{chartDetails.value}/5</span>
+                          </div>
+
+                          <div className="flex items-center text-sm">
+                            <span className={`w-20 font-medium ${isCritical ? 'text-slate-400' : 'text-slate-600'}`}>{translations[lang].categoryService}</span>
+                            <div className={`flex-1 h-2.5 rounded-full overflow-hidden ${isCritical ? 'bg-slate-700' : 'bg-slate-100'}`}>
+                              <div className="h-full bg-blue-500 rounded-full transition-all duration-1000" style={{ width: `${(chartDetails.service / 5) * 100}%` }}></div>
+                            </div>
+                            <span className={`w-10 text-right font-semibold ${isCritical ? 'text-slate-300' : 'text-slate-500'}`}>{chartDetails.service}/5</span>
+                          </div>
+
+                          <div className="flex items-center text-sm">
+                            <span className={`w-20 font-medium ${isCritical ? 'text-slate-400' : 'text-slate-600'}`}>{translations[lang].categoryTime}</span>
+                            <div className={`flex-1 h-2.5 rounded-full overflow-hidden ${isCritical ? 'bg-slate-700' : 'bg-slate-100'}`}>
+                              <div className="h-full bg-purple-500 rounded-full transition-all duration-1000" style={{ width: `${(chartDetails.time / 5) * 100}%` }}></div>
+                            </div>
+                            <span className={`w-10 text-right font-semibold ${isCritical ? 'text-slate-300' : 'text-slate-500'}`}>{chartDetails.time}/5</span>
+                          </div>
+
+                        </div>
+                      </div>
+                    )}
+                  </section>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery("");
+                      setShowResult(false);
+                    }}
+                    className={`w-full rounded-xl border px-4 py-3 text-sm font-medium transition shadow-sm ${
+                      isCritical 
+                        ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700' 
+                        : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    {translations[lang].searchAgain}
+                  </button>
+                </div>
+              </div>
+
+              <div className={`mt-8 px-6 py-4 border-t ${isCritical ? 'bg-slate-900 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                <p className={`text-[10px] leading-relaxed break-keep ${isCritical ? 'text-slate-500' : 'text-slate-400'}`}>
+                  {translations[lang].disclaimer}
+                </p>
+              </div>
+            </section>
+          ) : !isAnalyzing ? (
+            <div className="flex flex-col items-center justify-start w-full transition-all mt-12"> 
+              
+              <header className="mb-12 text-center relative z-10">
+                <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl mb-4 text-slate-900">
+                  {translations[lang].heroTitle}
+                </h1>
+                <p className="text-lg sm:text-xl text-slate-500 font-medium leading-relaxed">
+                  {translations[lang].heroSubtitle}
+                </p>
+              </header>
+
+              <div className="relative w-full max-w-2xl">
+                {/* 🍜 라면 & 🍔 햄버거는 그대로 유지 */}
+                <span className="absolute -top-14 -left-28 text-7xl animate-bounce duration-[1200ms] select-none cursor-default drop-shadow-xl z-0">
+                  🍜
+                </span>
+                <span className="absolute -top-10 -right-28 text-7xl animate-bounce duration-[1500ms] delay-200 select-none cursor-default drop-shadow-xl z-0">
+                  🍔
+                </span>
+
+                {/* 🍕 피자: 초반 속도를 억제하기 위해 duration을 6000ms로 늘리고 linear 적용 */}
+                <div className="absolute top-20 -left-24 w-12 h-12 flex items-center justify-center group/pizza z-[50]">
+                  <span className="text-4xl opacity-70 transition-transform duration-[6000ms] ease-linear pointer-events-none group-hover/pizza:scale-[80] group-hover/pizza:opacity-100 group-hover/pizza:z-[100] select-none origin-center">
+                    🍕
+                  </span>
+                </div>
+
+                {/* 🍣 초밥: 초반 속도를 억제하기 위해 duration을 7000ms로 늘리고 linear 적용 */}
+                <div className="absolute top-24 -right-24 w-12 h-12 flex items-center justify-center group/sushi z-[50]">
+                  <span className="text-4xl opacity-70 transition-transform duration-[7000ms] ease-linear pointer-events-none group-hover/sushi:scale-[80] group-hover/sushi:opacity-100 group-hover/sushi:z-[100] select-none origin-center">
+                    🍣
+                  </span>
+                </div>
+
+                <section className="w-full rounded-3xl border border-slate-200 bg-white px-6 py-8 shadow-2xl relative z-10">
+                  <form className="flex flex-col gap-4 sm:flex-row sm:items-end" onSubmit={handleSubmit}>
+                    <label className="flex-1">
+                      <span className="mb-3 block text-sm font-bold text-slate-700 ml-1">{translations[lang].searchLabel}</span>
+                      <div className="relative">
+                        <span className="pointer-events-none absolute inset-y-0 left-4 flex items-center text-slate-400">
+                          <Search className="h-5 w-5" />
+                        </span>
+                        <input
+                          type="text"
+                          value={searchQuery}
+                          onChange={(event) => setSearchQuery(event.target.value)}
+                          placeholder={translations[lang].searchPlaceholder}
+                          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-12 py-4 text-base text-slate-900 placeholder:text-slate-400 outline-none ring-0 transition focus:border-slate-600 focus:bg-white"
+                        />
+                      </div>
+                    </label>
+                    <button
+                      type="submit"
+                      disabled={!searchQuery.trim() || isSearching}
+                      className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-8 py-4 text-lg font-bold text-white shadow-lg transition hover:bg-slate-800 active:scale-95 disabled:bg-slate-300 sm:min-w-[140px]"
+                    >
+                      {isSearching ? translations[lang].searching : translations[lang].searchButton}
+                    </button>
+                  </form>
+
+                  <p className="mt-4 text-xs text-center text-slate-400">
+                    {translations[lang].recentHint}
+                  </p>
+
+                  {/* 검색 결과 목록 */}
+                  {searchResults.length > 0 && (
+                    <div className="border-t border-slate-100 pt-4 mt-4 text-left">
+                      <p className="mb-2 text-xs font-medium text-slate-500">{translations[lang].searchResultsTitle}</p>
+                      <div className="max-h-64 overflow-y-auto pr-1">
+                        <ul className="space-y-2">
+                          {searchResults.map((place) => (
+                            <li key={`${place.name}-${place.address}`}>
+                              <button
+                                type="button"
+                                onClick={() => handleAnalyzePlace(place)}
+                                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left text-sm text-slate-800 transition hover:bg-slate-100"
+                              >
+                                <p className="font-medium text-slate-900">{place.name}</p>
+                                <p className="mt-0.5 text-xs text-slate-500">{place.address}</p>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
                       </div>
                     </div>
                   )}
                 </section>
-
+              </div>
+            </div> 
+          ) : (
+            /* 분석 중 화면 섹션 */
+            <section className="rounded-2xl border border-slate-200 bg-white px-4 py-8 shadow-sm sm:px-6 sm:py-10">
+              <div className="flex flex-col items-center text-center gap-6">
+                <div className="flex flex-col items-center gap-3">
+                  <Loader2 className="h-8 w-8 text-slate-600 animate-spin" />
+                  <p className="text-sm font-medium text-slate-800">{translations[lang].analyzingTitle}</p>
+                  <p className="text-sm text-slate-500 min-h-[1.5rem]">{translations[lang].loadingMessages[messageIndex]}</p>
+                </div>
+                <div className="w-full rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-16 text-sm text-slate-400 sm:py-20 flex items-center justify-center">
+                  <span>{translations[lang].analyzingEngineLabel}</span>
+                </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    setSearchQuery("");
-                    setShowResult(false);
-                  }}
-                  className={`w-full rounded-xl border px-4 py-3 text-sm font-medium transition shadow-sm ${
-                    isCritical 
-                      ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700' 
-                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
-                  }`}
+                  onClick={() => setIsAnalyzing(false)}
+                  className="text-xs text-slate-500 underline-offset-2 hover:underline"
                 >
-                  {translations[lang].searchAgain}
+                  {translations[lang].cancelAnalyze}
                 </button>
               </div>
-            </div>
-
-            <div className={`mt-8 px-6 py-4 border-t ${isCritical ? 'bg-slate-900 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
-              <p className={`text-[10px] leading-relaxed break-keep ${isCritical ? 'text-slate-500' : 'text-slate-400'}`}>
-                {translations[lang].disclaimer}
-              </p>
-            </div>
-          </section>
-        ) : !isAnalyzing ? (
-          <>
-            <header className="mb-8 text-center">
-              <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
-                {translations[lang].heroTitle}
-              </h1>
-              <p className="mt-3 text-sm sm:text-base text-slate-500">
-                {translations[lang].heroSubtitle}
-              </p>
-            </header>
-
-            <section className="rounded-2xl border border-slate-200 bg-white px-4 py-5 shadow-sm sm:px-6 sm:py-6 space-y-4">
-              <form className="flex flex-col gap-3 sm:flex-row sm:items-center" onSubmit={handleSubmit}>
-                <label className="flex-1">
-                  <span className="mb-2 block text-xs font-medium text-slate-600">{translations[lang].searchLabel}</span>
-                  <div className="relative">
-                    <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-slate-400">
-                      <Search className="h-4 w-4" />
-                    </span>
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                      placeholder={translations[lang].searchPlaceholder}
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-10 py-3 text-sm sm:text-base text-slate-900 placeholder:text-slate-400 outline-none ring-0 transition focus:border-slate-400 focus:bg-white focus:shadow-[0_0_0_1px_rgba(148,163,184,0.75)]"
-                    />
-                  </div>
-                </label>
-                <button
-                  type="submit"
-                  disabled={!searchQuery.trim() || isSearching}
-                  className="mt-1 inline-flex items-center justify-center rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 sm:mt-7 sm:min-w-[120px]"
-                >
-                  {isSearching ? translations[lang].searching : translations[lang].searchButton}
-                </button>
-              </form>
-
-              <p className="text-[11px] text-center text-slate-400 animate-in fade-in duration-700">
-                {translations[lang].recentHint}
-              </p>
-
-              {searchResults.length > 0 && (
-                <div className="border-t border-slate-100 pt-4">
-                  <p className="mb-2 text-xs font-medium text-slate-500">{translations[lang].searchResultsTitle}</p>
-                  <div className="max-h-64 overflow-y-auto pr-1">
-                    <ul className="space-y-2">
-                      {searchResults.map((place) => (
-                        <li key={`${place.name}-${place.address}`}>
-                          <button
-                            type="button"
-                            onClick={() => handleAnalyzePlace(place)}
-                            className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left text-sm text-slate-800 transition hover:bg-slate-100 hover:border-slate-300"
-                          >
-                            <p className="font-medium text-slate-900">{place.name}</p>
-                            <p className="mt-0.5 text-xs text-slate-500">{place.address}</p>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              )}
             </section>
-          </>
-        ) : (
-          <section className="rounded-2xl border border-slate-200 bg-white px-4 py-8 shadow-sm sm:px-6 sm:py-10">
-            <div className="flex flex-col items-center text-center gap-6">
-              <div className="flex flex-col items-center gap-3">
-                <Loader2 className="h-8 w-8 text-slate-600 animate-spin" />
-                <p className="text-sm font-medium text-slate-800">{translations[lang].analyzingTitle}</p>
-                <p className="text-sm text-slate-500 min-h-[1.5rem]">{translations[lang].loadingMessages[messageIndex]}</p>
-              </div>
-              <div className="w-full rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-16 text-sm text-slate-400 sm:py-20 flex items-center justify-center">
-                <span>{translations[lang].analyzingEngineLabel}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsAnalyzing(false)}
-                className="text-xs text-slate-500 underline-offset-2 hover:underline"
-              >
-                {translations[lang].cancelAnalyze}
-              </button>
-            </div>
-          </section>
-        )}
-      </div>
-    </main>
+          )}
+        </div>
+      </main>
+    </>
   );
 }
