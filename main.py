@@ -44,15 +44,15 @@ def get_dynamic_prompt(lang, place_info):
         guidelines = """
         [Detection: Review Events & Fake Patterns]
         1. Identify phrases like "got a free drink/side", "event participation", "review for service".
-        2. Contextual Detection: Even without 'event' keywords, if a 5-star review only praises "kindness" or "cleanliness" without any specific details about the food (taste, texture, ingredients), treat it as a high-probability fake/promotional pattern.
+        2. Contextual Detection: Even without 'event' keywords, if a 5-star review only praises "kindness" or "cleanliness" without specific details about the food, treat it as a high-probability fake/promotional pattern.
         3. Suspicious 5.0 stars: Extremely short reviews or emoji-only reviews are considered zero-value data.
-        4. Weighting: Give 2x weight to 1~3 star reviews that describe specific issues (hygiene, attitude, price).
+        4. Weighting: Give 1.5x weight to 1~3 star reviews that describe specific issues (hygiene, attitude, price).
         5. Calculate 'eventProbability' (0~100%): High probability if reviews lack substance or focus solely on non-food factors.
         
-        [Strict Scoring Rules]
-        1. Base Score: 3.0. Do not exceed 4.0 unless it's a legendary spot.
-        2. Deductions: Rude service/Hygiene (-1.5), Overpriced (-1.0).
-        3. Hard Ceiling: If 'eventProbability' > 70%, the 'realScore' MUST NOT exceed 2.9 regardless of other factors.
+        [Balanced Scoring Rules]
+        1. Base Score: 3.0. (A decent, average restaurant should land between 2.5 and 3.5). Do not exceed 4.0 unless it's an exceptional spot with overwhelming praise.
+        2. Hard Ceiling: If 'eventProbability' > 70%, the 'realScore' MUST NOT exceed 2.9.
+        3. Proportional Deductions: Do not deduct massively for 1 or 2 isolated bad reviews. Deduct -0.2 to -0.8 for systemic hygiene/rude service issues, and -0.1 to -0.5 for overpriced/long waits, depending on the frequency of these complaints.
         """
         json_format = """
         {
@@ -69,15 +69,15 @@ def get_dynamic_prompt(lang, place_info):
         guidelines = """
         [리뷰 이벤트 및 조작 패턴 감지]
         1. 핵심 키워드 감시: '서비스 받았어요', '이벤트 참여', '음료수 서비스', '사진 리뷰 약속' 등의 문구가 보이면 무조건 'eventProbability'를 높이세요.
-        2. 맥락적 정황 포착: '이벤트'라는 직접적 단어가 없더라도, 음식(맛, 식감, 양)에 대한 구체적 묘사 없이 "사장님이 친절해요", "가게가 예뻐요" 등 부차적인 칭찬만 나열된 5점 리뷰는 보상형 리뷰일 확률이 매우 높으므로 'eventProbability'에 적극 반영하세요.
-        3. 영혼 없는 5점: "맛있어요", "최고예요" 등 구체적인 설명 없이 이모티콘만 있거나 너무 짧은 5점 리뷰는 '리뷰 이벤트' 정황으로 간주합니다.
-        4. 신뢰도 가중치: 사진이 없거나 짧은 5점보다, 단점을 구체적으로 지적한 1~3점 리뷰에 2배의 가중치를 두어 점수를 깎으세요.
+        2. 맥락적 정황 포착: '이벤트'라는 직접적 단어가 없더라도, 음식에 대한 구체적 묘사 없이 "친절해요", "예뻐요" 등 부차적인 칭찬만 나열된 5점 리뷰는 보상형 리뷰일 확률이 높습니다.
+        3. 영혼 없는 5점: 구체적인 설명 없이 이모티콘만 있거나 너무 짧은 5점 리뷰는 '리뷰 이벤트' 정황으로 간주합니다.
+        4. 신뢰도 가중치: 단점을 구체적으로 지적한 1~3점 리뷰에 1.5배의 가중치를 두어 점수를 평가하세요.
         5. 'eventProbability' 산출: 0~100% 사이의 정수로, 리뷰 이벤트가 의심되는 정도를 계산하세요.
 
-        [엄격한 채점 기준]
-        1. 기본 점수: 3.0점. 4.0점 이상은 대한민국 상위 1% 식당에만 부여합니다.
-        2. 점수 상한선: 'eventProbability'가 70% 이상이면 'realScore'는 무조건 2.9점 이하로 강제 고정합니다.
-        3. 감점: 불친절/위생(-1.5점), 웨이팅/비쌈(-1.0점).
+        [균형 잡힌 채점 기준]
+        1. 기준점: 3.0점. (실패 없는 무난하고 괜찮은 식당은 2.5점~3.5점 사이로 평가하세요). 4.0점 이상은 압도적인 극찬이 다수일 때만 부여합니다.
+        2. 점수 상한선: 'eventProbability'가 70% 이상이면 'realScore'는 최대 2.9점을 넘을 수 없습니다.
+        3. 유연한 감점: 단 1~2개의 악플로 점수를 과도하게 깎지 마세요. 전체 리뷰 중 단점이 차지하는 비율에 따라 감점하세요. 심각한 불친절/위생 문제는 빈도에 따라 -0.2점 ~ -0.8점, 가성비/웨이팅 문제는 -0.1 ~ -0.5점 내에서 유연하게 차감하세요.
         """
         json_format = """
         {
