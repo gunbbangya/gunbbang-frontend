@@ -247,12 +247,12 @@ async def save_map_flag(request: Request):
         name = data.get("name")
         address = data.get("address")
         score = data.get("score")
+        aiSummary = data.get("aiSummary") # 👈 프론트에서 보낸 요약 받기
+        details = data.get("details")     # 👈 프론트에서 보낸 상세점수 받기
 
         if not name or score is None:
             raise HTTPException(status_code=400, detail="데이터 부족")
 
-        # DB의 'places_cache' 컬렉션에 분석 결과 형식으로 저장합니다.
-        # 이렇게 저장해야 나중에 GET으로 불러올 수 있습니다.
         update_data = {
             "name": name,
             "address": address,
@@ -260,12 +260,14 @@ async def save_map_flag(request: Request):
             "result_ko": {
                 "name": name,
                 "address": address,
-                "realScore": score
+                "realScore": score,
+                "aiSummary": aiSummary,  # 👈 DB에 요약 저장
+                "details": details       # 👈 DB에 상세점수 저장
             }
         }
         
         collection.update_one({"name": name}, {"$set": update_data}, upsert=True)
-        print(f"💾 [DB 깃발 저장] {name} ({score}점)")
+        print(f"💾 [DB 깃발 저장 완료] {name} ({score}점, 요약/상세 포함)")
         return {"status": "success"}
     except Exception as e:
         print("🚨 깃발 저장 에러:", e)
@@ -281,24 +283,25 @@ def get_map_flags():
         
     flags = []
     try:
-        # DB에서 분석 결과('result_ko')가 있는 데이터를 모두 찾습니다.
         docs = collection.find({"result_ko": {"$exists": True}})
         
         for doc in docs:
             data = doc["result_ko"]
             score = data.get("realScore", 0)
             
-            # 3.5점 이상인 것만 깃발 리스트에 담기
             if score >= 3.5:
                 flags.append({
                     "name": data.get("name", doc.get("name")),
                     "address": data.get("address", doc.get("address")),
-                    "score": score
+                    "score": score,
+                    "aiSummary": data.get("aiSummary", ""), # 👈 지도에 띄울 때 요약도 꺼내기
+                    "details": data.get("details", None)    # 👈 지도에 띄울 때 상세점수도 꺼내기
                 })
         return flags
     except Exception as e:
         print("🚨 깃발 불러오기 에러:", e)
         return []
+   
 
 # 🚀 서버 실행 코드 (무조건 맨 마지막에 있어야 함!)
 if __name__ == "__main__":
