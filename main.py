@@ -226,12 +226,18 @@ async def analyze_place(request: Request):
                     collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
                     print(f"💾 [DB 저장] '{query}' 최신 분석 결과 저장 완료!")
                 
-                # 💡 [포인트 3] 방금 돌린 게 진짜 아예 처음 찾은 거면 True, 30일 갱신인 거면 False!
                 final_result["isNewDiscovery"] = not already_existed 
                 return final_result
+
+            else:
+                print(f"🚨 [{model_name}] AI가 JSON 양식을 안 지켰습니다! 대답: {response.text}")
                 
-        except: continue
-        
+        except Exception as e:
+            # 💡 [핵심 덫] 여기서 에러를 삼키지 말고 터미널에 출력합니다!
+            print(f"🚨 [{model_name}] 뻗은 이유: {str(e)}")
+            continue
+            
+    print("🚨 모든 Gemini 모델 시도 실패. 500 에러를 반환합니다.")
     raise HTTPException(status_code=500, detail="분석 실패")
 
 # ==========================================
