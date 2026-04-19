@@ -43,6 +43,10 @@ const translations: Record<
     missingSummaryFallback: string;
     fakeReviewTitle: string;
     fakeReviewDesc: string;
+    // 💡 새로 추가된 번역 (에너지 제한 관련)
+    limitExceeded: string;
+    overloadError: string;
+    energyLabel: string;
   }
 > = {
   ko: {
@@ -84,6 +88,9 @@ const translations: Record<
     missingSummaryFallback: "요약 데이터를 불러오지 못했습니다.",
     fakeReviewTitle: "리뷰 조작 정황 포착",
     fakeReviewDesc: "음식에 대한 구체적 평가보다 보상형/친절 묘사가 비정상적으로 많습니다. 평점의 거품을 걷어냈습니다.",
+    limitExceeded: "오늘 할당된 15회의 분석 에너지를 모두 소모했습니다. 내일 다시 찾아주세요!",
+    overloadError: "현재 접속자가 많아 AI가 과부하 상태입니다. 약 1분 후 다시 시도해 주세요!",
+    energyLabel: "오늘의 분석 에너지",
   },
   en: {
     loadingMessages: [
@@ -124,6 +131,9 @@ const translations: Record<
     missingSummaryFallback: "Failed to load the summary.",
     fakeReviewTitle: "Fake Review Pattern Detected",
     fakeReviewDesc: "Abnormally high ratio of reward-based or non-food related praise detected. Score adjusted accordingly.",
+    limitExceeded: "You have used all 15 analysis energies for today. Please come back tomorrow!",
+    overloadError: "AI is currently overloaded. Please try again in about 1 minute!",
+    energyLabel: "Daily Energy",
   },
 };
 
@@ -157,6 +167,9 @@ export default function HomePage() {
   const [redFlags, setRedFlags] = useState(0);
   const [goldFlags, setGoldFlags] = useState(0);
 
+  // 💡 1. 사용자별 일일 분석 횟수 상태 추가
+  const [userDailyCount, setUserDailyCount] = useState(0);
+
   const isCritical = showResult && realScore !== null && realScore <= 2.9;
 
   const setLanguage = (nextLang: Lang) => {
@@ -175,13 +188,24 @@ export default function HomePage() {
     } catch { }
   }, []);
 
-  // 💡 처음 사이트 들어왔을 때 내 깃발 개수 불러오기
+  // 💡 처음 사이트 들어왔을 때 내 깃발 및 일일 사용량 불러오기
   useEffect(() => {
     try {
       const storedRed = localStorage.getItem("jjin-view:redFlags");
       const storedGold = localStorage.getItem("jjin-view:goldFlags");
       if (storedRed) setRedFlags(parseInt(storedRed, 10));
       if (storedGold) setGoldFlags(parseInt(storedGold, 10));
+
+      // 일일 사용량 불러오기
+      const savedData = JSON.parse(localStorage.getItem('zzinview_usage') || '{}');
+      const today = new Date().toLocaleDateString();
+
+      if (savedData.date === today) {
+        setUserDailyCount(savedData.count || 0);
+      } else {
+        localStorage.setItem('zzinview_usage', JSON.stringify({ date: today, count: 0 }));
+        setUserDailyCount(0);
+      }
     } catch { }
   }, []);
 
@@ -222,7 +246,14 @@ export default function HomePage() {
     void fetchSearchResults();
   };
 
+  // 💡 2. 분석 실행 함수에 제한 로직 통합
   const handleAnalyzePlace = (place: { name: string; address: string }) => {
+    // [제한 1] 하루 15회 다 썼는지 체크
+    if (userDailyCount >= 15) {
+      alert(translations[lang].limitExceeded);
+      return;
+    }
+
     setSelectedPlace(place);
     setIsAnalyzing(true);
 
@@ -235,7 +266,21 @@ export default function HomePage() {
           body: JSON.stringify({ query: query, lang }),
         });
 
+        // [제한 2] 백엔드에서 429 에러(과부하)가 왔을 때
+        if (response.status === 429) {
+          alert(translations[lang].overloadError);
+          setIsAnalyzing(false);
+          setShowResult(false);
+          return;
+        }
+
         if (!response.ok) throw new Error("Analyze response not ok");
+
+        // 정상적으로 분석에 성공했을 때만 내 남은 횟수 1 차감 (사용량 증가)
+        const newCount = userDailyCount + 1;
+        setUserDailyCount(newCount);
+        const today = new Date().toLocaleDateString();
+        localStorage.setItem('zzinview_usage', JSON.stringify({ date: today, count: newCount }));
 
         const data = await response.json();
         console.log("🤖 AI가 보낸 원본 데이터:", data);
@@ -246,7 +291,6 @@ export default function HomePage() {
         setAiSummary(data.aiSummary ?? translations[lang].missingSummaryFallback);
         setChartDetails(data.details ?? { taste: 0, value: 0, service: 0, time: 0 });
 
-        // 💡 1. [진짜 깃발 꽂기] 3.5점 이상이면 백엔드 DB에 저장
         if (score >= 3.5) {
           try {
             const flagRes = await fetch("https://gunbbang-backend.onrender.com/api/map-flags", {
@@ -259,21 +303,18 @@ export default function HomePage() {
               }),
             });
             if (!flagRes.ok) throw new Error("Render 서버에 주소가 아직 없어요! (배포 필요)");
-            console.log("✅ 백엔드 DB에 깃발 저장 완료!");
           } catch (err) {
             console.error("❌ 깃발 저장 실패:", err);
           }
         }
 
-        // 💡 2. [최초 발견 애니메이션] 폭죽 팡팡!
         if (data.isNewDiscovery) {
           if (score >= 4.0) {
-            // 🏆 4.0 이상: 황금빛 대형 폭죽!
             confetti({
               particleCount: 200,
               spread: 120,
               origin: { y: 0.6 },
-              colors: ['#FFD700', '#FFA500', '#FF8C00'] // 황금/오렌지색
+              colors: ['#FFD700', '#FFA500', '#FF8C00'] 
             });
             
             setGoldFlags((prev) => {
@@ -284,12 +325,11 @@ export default function HomePage() {
             alert(`🎉 [최초 발견] 대박! 4.0점 이상 황금 깃발 맛집을 발견하셨습니다!`);
             
           } else if (score >= 3.5) {
-            // 🚩 3.5 이상: 빨간빛 축하 폭죽!
             confetti({
               particleCount: 100,
               spread: 80,
               origin: { y: 0.6 },
-              colors: ['#FF0000', '#FFFFFF', '#FFB6C1'] // 빨간색 계열
+              colors: ['#FF0000', '#FFFFFF', '#FFB6C1'] 
             });
             
             setRedFlags((prev) => {
@@ -313,22 +353,34 @@ export default function HomePage() {
     void fetchAnalysis();
   };
 
+  // 에너지가 얼마 안 남았을 때 배지 색상 변경 로직
+  const remainingEnergy = Math.max(0, 15 - userDailyCount);
+  const energyColorClass = remainingEnergy <= 3 
+    ? "bg-orange-50 border-orange-200 text-orange-600" 
+    : "bg-blue-50 border-blue-200 text-blue-700";
+
   return (
     <>
-      {/* 💡 지도가 열려있으면 오버레이 렌더링 */}
       {isMapOpen && <MapOverlay onClose={() => setIsMapOpen(false)} />}
 
       <main className={`min-h-screen flex items-center justify-center px-4 py-10 transition-colors duration-1000 ${isCritical ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
         <div className="w-full max-w-xl">
           
-          {/* 💡 상단 바 (깃발 카운트 + 언어 + 지도 버튼) */}
-          <div className="mb-6 flex items-center justify-between">
-            {/* 내 수집품 (깃발 카운트) */}
-            <div className="flex gap-3 rounded-xl border border-slate-200 bg-white px-4 py-2 shadow-sm">
-              <span className="text-sm font-bold text-slate-700">🚩 {redFlags}</span>
-              <span className="text-sm font-bold text-slate-700">🏆 {goldFlags}</span>
+          <div className="mb-6 flex items-center justify-between flex-wrap gap-3">
+            {/* 💡 3. 좌측: 내 수집품 + 에너지 배너 통합 */}
+            <div className="flex gap-2">
+              <div className="flex gap-3 rounded-xl border border-slate-200 bg-white px-4 py-2 shadow-sm">
+                <span className="text-sm font-bold text-slate-700">🚩 {redFlags}</span>
+                <span className="text-sm font-bold text-slate-700">🏆 {goldFlags}</span>
+              </div>
+              
+              {/* 에너지 배너 */}
+              <div className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 shadow-sm transition-colors ${energyColorClass}`}>
+                <span className="text-sm font-bold">⚡ {translations[lang].energyLabel}: {remainingEnergy} / 15</span>
+              </div>
             </div>
 
+            {/* 우측: 지도 버튼 + 언어 변경 */}
             <div className="flex gap-2">
               <button
                 onClick={() => setIsMapOpen(true)}
@@ -507,7 +559,6 @@ export default function HomePage() {
               </header>
 
               <div className="relative w-full max-w-2xl">
-                {/* 🍜 라면 & 🍔 햄버거는 그대로 유지 */}
                 <span className="absolute -top-14 -left-28 text-7xl animate-bounce duration-[1200ms] select-none cursor-default drop-shadow-xl z-0">
                   🍜
                 </span>
@@ -515,14 +566,12 @@ export default function HomePage() {
                   🍔
                 </span>
 
-                {/* 🍕 피자: 초반 속도를 억제하기 위해 duration을 6000ms로 늘리고 linear 적용 */}
                 <div className="absolute top-20 -left-24 w-12 h-12 flex items-center justify-center group/pizza z-[50]">
                   <span className="text-4xl opacity-70 transition-transform duration-[6000ms] ease-linear pointer-events-none group-hover/pizza:scale-[80] group-hover/pizza:opacity-100 group-hover/pizza:z-[100] select-none origin-center">
                     🍕
                   </span>
                 </div>
 
-                {/* 🍣 초밥: 초반 속도를 억제하기 위해 duration을 7000ms로 늘리고 linear 적용 */}
                 <div className="absolute top-24 -right-24 w-12 h-12 flex items-center justify-center group/sushi z-[50]">
                   <span className="text-4xl opacity-70 transition-transform duration-[7000ms] ease-linear pointer-events-none group-hover/sushi:scale-[80] group-hover/sushi:opacity-100 group-hover/sushi:z-[100] select-none origin-center">
                     🍣
@@ -559,7 +608,6 @@ export default function HomePage() {
                     {translations[lang].recentHint}
                   </p>
 
-                  {/* 검색 결과 목록 */}
                   {searchResults.length > 0 && (
                     <div className="border-t border-slate-100 pt-4 mt-4 text-left">
                       <p className="mb-2 text-xs font-medium text-slate-500">{translations[lang].searchResultsTitle}</p>
@@ -585,7 +633,6 @@ export default function HomePage() {
               </div>
             </div> 
           ) : (
-            /* 분석 중 화면 섹션 */
             <section className="rounded-2xl border border-slate-200 bg-white px-4 py-8 shadow-sm sm:px-6 sm:py-10">
               <div className="flex flex-col items-center text-center gap-6">
                 <div className="flex flex-col items-center gap-3">
