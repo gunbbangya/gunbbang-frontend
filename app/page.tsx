@@ -430,19 +430,19 @@ export default function HomePage() {
                       </span>
 
                       {eventProb >= 70 && (
-                        <div className="mb-6 rounded-xl border-2 border-dashed border-amber-500/50 bg-amber-950/20 p-4 animate-in zoom-in duration-500">
+                        <div className="mb-6 rounded-xl border-2 border-dashed border-red-500/60 bg-red-950/40 p-4 animate-in zoom-in duration-500">
                           <div className="flex items-start sm:items-center gap-3">
-                            <span className="text-3xl animate-bounce mt-1 sm:mt-0">🤨</span>
+                            <span className="text-3xl animate-bounce mt-1 sm:mt-0">🚨</span>
                             <div>
-                              <p className="text-sm font-bold text-amber-500">
-                                {translations[lang].fakeReviewTitle} ({eventProb}%)
-                              </p>
-                              <p className="text-xs text-amber-200/70 mt-0.5 leading-relaxed break-keep">
-                                {translations[lang].fakeReviewDesc}
-                              </p>
+                             <p className="text-sm font-bold text-red-400">
+                              {translations[lang].fakeReviewTitle} ({eventProb}%)
+                             </p>
+                             <p className="text-xs text-red-100/90 mt-0.5 leading-relaxed break-keep">
+                              {translations[lang].fakeReviewDesc}
+                            </p>
                             </div>
                           </div>
-                        </div>
+                       </div>
                       )}
 
                       {typeof realScore === "number" && (
