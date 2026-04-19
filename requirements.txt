@@ -7,3 +7,4 @@ python-dotenv
 requests
 pymongo==4.6.2
 certifi
+openai

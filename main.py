@@ -1,6 +1,5 @@
 import os
 import json
-import re
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -8,22 +7,25 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from scraper import search_and_get_reviews 
-import google.generativeai as genai
 from dotenv import load_dotenv
-from pymongo import MongoClient  # 💡 MongoDB 도구
+from pymongo import MongoClient
 import certifi
-
+from openai import OpenAI  # 💡 구글 대신 OpenAI 수입!
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# ==========================================
+# 💡 OpenAI 클라이언트 설정 (.env의 OPENAI_API_KEY 사용)
+# ==========================================
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ==========================================
 # 💡 MongoDB 클라우드 연결 설정
 # ==========================================
 MONGO_URI = os.getenv("MONGO_URI")
 try:
-    client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-    db = client["jjin_view_db"]
+    mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+    db = mongo_client["jjin_view_db"]
     collection = db["places_cache"]
     print("✅ MongoDB 클라우드 연결 성공!")
 except Exception as e:
@@ -34,10 +36,11 @@ last_queries = {}
 
 # --- Rate Limit 설정 ---
 user_requests = defaultdict(list)
-RATE_LIMIT = 10 
-WINDOW_SECONDS = 60
+# 💡 사용자님의 요청대로 하루 검색 기회를 시원하게 1500번으로 늘렸습니다!
+RATE_LIMIT = 1500 
+WINDOW_SECONDS = 86400 # 60초가 아니라 하루(86400초) 기준으로 1500번 체크
 
-# --- 동적 프롬프트 생성 (구글 데이터 맞춤형 - 리뷰어 성향 삭제) ---
+# --- 동적 프롬프트 생성 ---
 def get_dynamic_prompt(lang, place_info):
     if lang == "en":
         instruction = "You are a 'Cold-blooded Restaurant Profiler'. Evaluate the reviews strictly. DO NOT mention the evaluation criteria, keywords, or your internal process in the summary. Provide only the final, objective critique."
@@ -105,7 +108,7 @@ async def limit_requests(request: Request, call_next):
         if len(user_requests[client_ip]) >= RATE_LIMIT:
             return JSONResponse(
                 status_code=429, 
-                content={"detail": "Too many requests. AI도 숨 좀 돌려야 해요! 1분 뒤에 다시 해주세요. 🚀"}
+                content={"detail": "하루 검색 횟수를 모두 사용하셨습니다! 내일 다시 찾아주세요. 🚀"}
             )
         user_requests[client_ip].append(now)
     return await call_next(request)
@@ -158,16 +161,14 @@ async def analyze_place(request: Request):
         
     lang = data.get("lang") or "ko"
     
-    # 💡 [포인트 1] 이 식당이 예전에 한 번이라도 검색된 적 있는지 기억해두기!
     already_existed = False 
     
     if collection is not None:
         cached_item = collection.find_one({"name": query})
         
         if cached_item:
-            already_existed = True # DB에 흔적이 있으니 최초 발견은 아님!
+            already_existed = True 
             
-            # 1. 수집 공장(db_builder)이 모아둔 데이터
             builder_cache_key = f"analysis_{lang}"
             if builder_cache_key in cached_item and cached_item[builder_cache_key]:
                 return {
@@ -175,75 +176,63 @@ async def analyze_place(request: Request):
                     "name": cached_item.get("name", query),
                     "address": cached_item.get("address", ""),
                     "rating": 0,
-                    "isNewDiscovery": False  # 깃발 꽂지 마
+                    "isNewDiscovery": False  
                 }
                 
-            # 2. 실시간 검색 기록 (30일 유효기간 체크 부활!)
             realtime_cache_key = f"result_{lang}"
             if realtime_cache_key in cached_item and cached_item[realtime_cache_key]:
                 cache_date = datetime.strptime(cached_item["date"], "%Y-%m-%d")
                 
                 if datetime.now() - cache_date < timedelta(days=30):
-                    # 30일 안 지났으면 바로 결과 보여주기
                     print(f"⚡ [DB 적중] '{query}' - 최근 30일 내 검색 기록 반환!")
                     result_data = cached_item[realtime_cache_key]
-                    result_data["isNewDiscovery"] = False # 깃발 꽂지 마
+                    result_data["isNewDiscovery"] = False 
                     return result_data
                 else:
-                    # 30일 지났으면? 아래 실시간 분석으로 내려보내서 최신화 진행!
                     print(f"🔄 [DB 갱신] '{query}' - 30일이 지나 최신 데이터로 다시 검색합니다.")
 
-    # 💡 [포인트 2] 실시간 분석 (최초 발견이거나, 30일 지나서 갱신하는 경우)
-    print(f"🔍 [실시간 분석] '{query}' AI 가동 중...")
+    print(f"🔍 [실시간 분석] '{query}' AI 가동 중 (OpenAI 사용)...")
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
 
-    target_models = [
-    'models/gemini-1.5-flash',        # 1순위: 가장 정석적인 풀네임
-    'models/gemini-1.5-flash-latest', # 2순위: 1.5 플래시 최신 버전
-    'models/gemini-1.5-pro-latest',   # 3순위: 1.5 프로 최신 버전
-    'gemini-1.5-flash'                # 4순위: 혹시 몰라서 넣는 기본형
-]
+    # 💡 [핵심] 구글 모델 돌려막기 삭제하고, 가장 똑똑한 OpenAI 하나로 직진!
+    try:
+        prompt = get_dynamic_prompt(lang, place_info)
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={ "type": "json_object" }, # 무조건 JSON으로 대답하게 강제!
+            messages=[
+                {"role": "system", "content": "You are a JSON generating assistant."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        ai_text = response.choices[0].message.content
+        ai_data = json.loads(ai_text)
+        
+        final_result = {
+            **ai_data, 
+            "name": ai_data.get("translatedName") or place_info['name'], 
+            "address": ai_data.get("translatedAddress") or place_info['address'], 
+            "rating": place_info['rating']
+        }
+        
+        if collection is not None:
+            update_data = {
+                "name": query,
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                f"result_{lang}": final_result
+            }
+            collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
+            print(f"💾 [DB 저장] '{query}' 최신 분석 결과 저장 완료!")
+        
+        final_result["isNewDiscovery"] = not already_existed 
+        return final_result
 
-    for model_name in target_models:
-        try:
-            model = genai.GenerativeModel(model_name)
-            prompt = get_dynamic_prompt(lang, place_info)
-            response = model.generate_content(prompt)
-            match = re.search(r'\{.*\}', response.text, re.DOTALL)
-            
-            if match:
-                ai_data = json.loads(match.group())
-                final_result = {
-                    **ai_data, 
-                    "name": ai_data.get("translatedName") or place_info['name'], 
-                    "address": ai_data.get("translatedAddress") or place_info['address'], 
-                    "rating": place_info['rating']
-                }
-                
-                # DB 업데이트
-                if collection is not None:
-                    update_data = {
-                        "name": query,
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        f"result_{lang}": final_result
-                    }
-                    collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
-                    print(f"💾 [DB 저장] '{query}' 최신 분석 결과 저장 완료!")
-                
-                final_result["isNewDiscovery"] = not already_existed 
-                return final_result
-
-            else:
-                print(f"🚨 [{model_name}] AI가 JSON 양식을 안 지켰습니다! 대답: {response.text}")
-                
-        except Exception as e:
-            # 💡 [핵심 덫] 여기서 에러를 삼키지 말고 터미널에 출력합니다!
-            print(f"🚨 [{model_name}] 뻗은 이유: {str(e)}")
-            continue
-            
-    print("🚨 모든 Gemini 모델 시도 실패. 500 에러를 반환합니다.")
-    raise HTTPException(status_code=500, detail="분석 실패")
+    except Exception as e:
+        print(f"🚨 [OpenAI 뻗음] 이유: {str(e)}")
+        raise HTTPException(status_code=500, detail="분석 실패")
 
 # ==========================================
 # 💡 [지도 기능 1] 3.5점 이상일 때 깃발 저장하기 (POST)
@@ -258,8 +247,8 @@ async def save_map_flag(request: Request):
         name = data.get("name")
         address = data.get("address")
         score = data.get("score")
-        aiSummary = data.get("aiSummary") # 👈 프론트에서 보낸 요약 받기
-        details = data.get("details")     # 👈 프론트에서 보낸 상세점수 받기
+        aiSummary = data.get("aiSummary") 
+        details = data.get("details")     
 
         if not name or score is None:
             raise HTTPException(status_code=400, detail="데이터 부족")
@@ -272,8 +261,8 @@ async def save_map_flag(request: Request):
                 "name": name,
                 "address": address,
                 "realScore": score,
-                "aiSummary": aiSummary,  # 👈 DB에 요약 저장
-                "details": details       # 👈 DB에 상세점수 저장
+                "aiSummary": aiSummary,  
+                "details": details       
             }
         }
         
@@ -305,16 +294,14 @@ def get_map_flags():
                     "name": data.get("name", doc.get("name")),
                     "address": data.get("address", doc.get("address")),
                     "score": score,
-                    "aiSummary": data.get("aiSummary", ""), # 👈 지도에 띄울 때 요약도 꺼내기
-                    "details": data.get("details", None)    # 👈 지도에 띄울 때 상세점수도 꺼내기
+                    "aiSummary": data.get("aiSummary", ""), 
+                    "details": data.get("details", None)    
                 })
         return flags
     except Exception as e:
         print("🚨 깃발 불러오기 에러:", e)
         return []
    
-
-# 🚀 서버 실행 코드 (무조건 맨 마지막에 있어야 함!)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
