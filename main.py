@@ -198,10 +198,13 @@ async def analyze_place(request: Request):
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
 
-    target_models = ['gemini-1.5-flash',
+    target_models = [
+    'models/gemini-1.5-flash',        # 1순위: 가장 정석적인 풀네임
+    'models/gemini-1.5-flash-latest', # 2순위: 1.5 플래시 최신 버전
+    'models/gemini-1.5-pro-latest',   # 3순위: 1.5 프로 최신 버전
+    'gemini-1.5-flash'                # 4순위: 혹시 몰라서 넣는 기본형
+]
 
-    'gemini-1.5-flash-001', 'gemini-1.5-flash-002','gemini-1.5-pro-002']
-    
     for model_name in target_models:
         try:
             model = genai.GenerativeModel(model_name)
