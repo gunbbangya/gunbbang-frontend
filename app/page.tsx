@@ -170,7 +170,7 @@ export default function HomePage() {
   // 💡 1. 사용자별 일일 분석 횟수 상태 추가
   const [userDailyCount, setUserDailyCount] = useState(0);
 
-  const isCritical = showResult && realScore !== null && realScore <= 2.9;
+  const isCritical = showResult && realScore !== null && realScore <= 2.4;
 
   const setLanguage = (nextLang: Lang) => {
     setLang(nextLang);
