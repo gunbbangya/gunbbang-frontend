@@ -300,9 +300,13 @@ export default function HomePage() {
                 name: place.name,
                 address: place.address,
                 score: score,
+                aiSummary: data.aiSummary, // 👈 AI 요약 추가
+                details: data.details,     // 👈 상세 점수(맛, 가성비 등) 추가
               }),
             });
-            if (!flagRes.ok) throw new Error("Render 서버에 주소가 아직 없어요! (배포 필요)");
+            
+            if (!flagRes.ok) throw new Error("DB 저장 실패");
+            console.log("✅ 모든 데이터가 포함된 깃발 저장 완료!");
           } catch (err) {
             console.error("❌ 깃발 저장 실패:", err);
           }
