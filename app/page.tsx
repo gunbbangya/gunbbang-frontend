@@ -249,7 +249,7 @@ export default function HomePage() {
   // 💡 2. 분석 실행 함수에 제한 로직 통합
   const handleAnalyzePlace = (place: { name: string; address: string }) => {
     // [제한 1] 하루 15회 다 썼는지 체크
-    if (userDailyCount >= 15) {
+    if (userDailyCount >= 1500) {
       alert(translations[lang].limitExceeded);
       return;
     }
