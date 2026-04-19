@@ -198,7 +198,7 @@ async def analyze_place(request: Request):
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
 
-    target_models = ['models/gemini-2.5-flash', 'models/gemini-2.0-flash', 'models/gemini-flash-latest']
+    target_models = ['gemini-1.5-flash','models/gemini-1.5-flash','gemini-1.5-pro','gemini-1.5-flash-latest']
     
     for model_name in target_models:
         try:
