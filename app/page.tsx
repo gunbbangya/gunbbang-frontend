@@ -43,10 +43,13 @@ const translations: Record<
     missingSummaryFallback: string;
     fakeReviewTitle: string;
     fakeReviewDesc: string;
-    // 💡 새로 추가된 번역 (에너지 제한 관련)
     limitExceeded: string;
     overloadError: string;
     energyLabel: string;
+    // 💡 새로 추가된 번역 (고급 검색 관련)
+    advancedButton: string;
+    returnBasic: string;
+    advancedStatus: string;
   }
 > = {
   ko: {
@@ -91,6 +94,9 @@ const translations: Record<
     limitExceeded: "오늘 할당된 15회의 분석 에너지를 모두 소모했습니다. 내일 다시 찾아주세요!",
     overloadError: "현재 접속자가 많아 AI가 과부하 상태입니다. 약 1분 후 다시 시도해 주세요!",
     energyLabel: "오늘의 분석 에너지",
+    advancedButton: "🔥 찐뷰 고급 검색 (카카오 리뷰 25개 심층 분석)",
+    returnBasic: "↩️ 구글 기본 요약으로 돌아가기",
+    advancedStatus: "🔥 심층 분석 완료",
   },
   en: {
     loadingMessages: [
@@ -134,6 +140,9 @@ const translations: Record<
     limitExceeded: "You have used all 15 analysis energies for today. Please come back tomorrow!",
     overloadError: "AI is currently overloaded. Please try again in about 1 minute!",
     energyLabel: "Daily Energy",
+    advancedButton: "🔥 Deep Search (Analyze 25 Kakao Reviews)",
+    returnBasic: "↩️ Return to Basic Google Summary",
+    advancedStatus: "🔥 Deep Analysis Complete",
   },
 };
 
@@ -155,6 +164,12 @@ export default function HomePage() {
     time: number;
   } | null>(null);
 
+  // 💡 고급 검색용 상태들 추가!
+  const [hasAdvanced, setHasAdvanced] = useState(false);
+  const [kakaoData, setKakaoData] = useState<any>(null);
+  const [basicData, setBasicData] = useState<any>(null);
+  const [isAdvancedView, setIsAdvancedView] = useState(false);
+
   const [selectedPlace, setSelectedPlace] = useState<{
     name: string;
     address: string;
@@ -162,12 +177,9 @@ export default function HomePage() {
 
   const [searchResults, setSearchResults] = useState<{ name: string; address: string }[]>([]);
 
-  // 💡 지도 열림 상태 & 깃발 수집 상태
   const [isMapOpen, setIsMapOpen] = useState(false);
   const [redFlags, setRedFlags] = useState(0);
   const [goldFlags, setGoldFlags] = useState(0);
-
-  // 💡 1. 사용자별 일일 분석 횟수 상태 추가
   const [userDailyCount, setUserDailyCount] = useState(0);
 
   const isCritical = showResult && realScore !== null && realScore <= 2.4;
@@ -176,9 +188,7 @@ export default function HomePage() {
     setLang(nextLang);
     try {
       localStorage.setItem(LANG_STORAGE_KEY, nextLang);
-    } catch {
-      // ignore
-    }
+    } catch { }
   };
 
   useEffect(() => {
@@ -188,7 +198,6 @@ export default function HomePage() {
     } catch { }
   }, []);
 
-  // 💡 처음 사이트 들어왔을 때 내 깃발 및 일일 사용량 불러오기
   useEffect(() => {
     try {
       const storedRed = localStorage.getItem("jjin-view:redFlags");
@@ -196,7 +205,6 @@ export default function HomePage() {
       if (storedRed) setRedFlags(parseInt(storedRed, 10));
       if (storedGold) setGoldFlags(parseInt(storedGold, 10));
 
-      // 일일 사용량 불러오기
       const savedData = JSON.parse(localStorage.getItem('zzinview_usage') || '{}');
       const today = new Date().toLocaleDateString();
 
@@ -225,6 +233,12 @@ export default function HomePage() {
     setSelectedPlace(null);
     setSearchResults([]);
     setIsSearching(true);
+    
+    // 💡 검색 새로 할 때 고급 뷰 상태 초기화
+    setHasAdvanced(false);
+    setKakaoData(null);
+    setBasicData(null);
+    setIsAdvancedView(false);
 
     const fetchSearchResults = async () => {
       try {
@@ -246,9 +260,7 @@ export default function HomePage() {
     void fetchSearchResults();
   };
 
-  // 💡 2. 분석 실행 함수에 제한 로직 통합
   const handleAnalyzePlace = (place: { name: string; address: string }) => {
-    // [제한 1] 하루 15회 다 썼는지 체크
     if (userDailyCount >= 1500) {
       alert(translations[lang].limitExceeded);
       return;
@@ -266,7 +278,6 @@ export default function HomePage() {
           body: JSON.stringify({ query: query, lang }),
         });
 
-        // [제한 2] 백엔드에서 429 에러(과부하)가 왔을 때
         if (response.status === 429) {
           alert(translations[lang].overloadError);
           setIsAnalyzing(false);
@@ -276,7 +287,6 @@ export default function HomePage() {
 
         if (!response.ok) throw new Error("Analyze response not ok");
 
-        // 정상적으로 분석에 성공했을 때만 내 남은 횟수 1 차감 (사용량 증가)
         const newCount = userDailyCount + 1;
         setUserDailyCount(newCount);
         const today = new Date().toLocaleDateString();
@@ -286,10 +296,25 @@ export default function HomePage() {
         console.log("🤖 AI가 보낸 원본 데이터:", data);
 
         const score = data.realScore ?? data.score ?? 0;
+        const eProb = data.eventProbability ?? 0;
+        const summary = data.aiSummary ?? translations[lang].missingSummaryFallback;
+        const details = data.details ?? { taste: 0, value: 0, service: 0, time: 0 };
+
+        // 💡 1. 기본 데이터 세팅 & 백업
         setRealScore(score);
-        setEventProb(data.eventProbability ?? 0);
-        setAiSummary(data.aiSummary ?? translations[lang].missingSummaryFallback);
-        setChartDetails(data.details ?? { taste: 0, value: 0, service: 0, time: 0 });
+        setEventProb(eProb);
+        setAiSummary(summary);
+        setChartDetails(details);
+        setBasicData({ score, eProb, summary, details });
+
+        // 💡 2. 고급 데이터가 있으면 세팅해두기 (버튼 띄울 준비)
+        if (data.has_advanced && data.kakao_data) {
+          setHasAdvanced(true);
+          setKakaoData(data.kakao_data);
+        } else {
+          setHasAdvanced(false);
+          setKakaoData(null);
+        }
 
         if (score >= 3.5) {
           try {
@@ -300,13 +325,11 @@ export default function HomePage() {
                 name: place.name,
                 address: place.address,
                 score: score,
-                aiSummary: data.aiSummary, // 👈 AI 요약 추가
-                details: data.details,     // 👈 상세 점수(맛, 가성비 등) 추가
+                aiSummary: data.aiSummary,
+                details: data.details,
               }),
             });
-            
             if (!flagRes.ok) throw new Error("DB 저장 실패");
-            console.log("✅ 모든 데이터가 포함된 깃발 저장 완료!");
           } catch (err) {
             console.error("❌ 깃발 저장 실패:", err);
           }
@@ -314,28 +337,15 @@ export default function HomePage() {
 
         if (data.isNewDiscovery) {
           if (score >= 4.0) {
-            confetti({
-              particleCount: 200,
-              spread: 120,
-              origin: { y: 0.6 },
-              colors: ['#FFD700', '#FFA500', '#FF8C00'] 
-            });
-            
+            confetti({ particleCount: 200, spread: 120, origin: { y: 0.6 }, colors: ['#FFD700', '#FFA500', '#FF8C00'] });
             setGoldFlags((prev) => {
               const next = prev + 1;
               localStorage.setItem("jjin-view:goldFlags", next.toString());
               return next;
             });
             alert(`🎉 [최초 발견] 대박! 4.0점 이상 황금 깃발 맛집을 발견하셨습니다!`);
-            
           } else if (score >= 3.5) {
-            confetti({
-              particleCount: 100,
-              spread: 80,
-              origin: { y: 0.6 },
-              colors: ['#FF0000', '#FFFFFF', '#FFB6C1'] 
-            });
-            
+            confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 }, colors: ['#FF0000', '#FFFFFF', '#FFB6C1'] });
             setRedFlags((prev) => {
               const next = prev + 1;
               localStorage.setItem("jjin-view:redFlags", next.toString());
@@ -357,7 +367,6 @@ export default function HomePage() {
     void fetchAnalysis();
   };
 
-  // 에너지가 얼마 안 남았을 때 배지 색상 변경 로직
   const remainingEnergy = Math.max(0, 15 - userDailyCount);
   const energyColorClass = remainingEnergy <= 3 
     ? "bg-orange-50 border-orange-200 text-orange-600" 
@@ -371,20 +380,17 @@ export default function HomePage() {
         <div className="w-full max-w-xl">
           
           <div className="mb-6 flex items-center justify-between flex-wrap gap-3">
-            {/* 💡 3. 좌측: 내 수집품 + 에너지 배너 통합 */}
             <div className="flex gap-2">
               <div className="flex gap-3 rounded-xl border border-slate-200 bg-white px-4 py-2 shadow-sm">
                 <span className="text-sm font-bold text-slate-700">🚩 {redFlags}</span>
                 <span className="text-sm font-bold text-slate-700">🏆 {goldFlags}</span>
               </div>
               
-              {/* 에너지 배너 */}
               <div className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 shadow-sm transition-colors ${energyColorClass}`}>
                 <span className="text-sm font-bold">⚡ {translations[lang].energyLabel}: {remainingEnergy} / 15</span>
               </div>
             </div>
 
-            {/* 우측: 지도 버튼 + 언어 변경 */}
             <div className="flex gap-2">
               <button
                 onClick={() => setIsMapOpen(true)}
@@ -425,8 +431,13 @@ export default function HomePage() {
                 <div className="space-y-8">
                   <header className="space-y-4">
                     <div>
-                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border mb-4 ${isCritical ? 'bg-emerald-900/30 text-emerald-400 border-emerald-800' : 'bg-emerald-50 text-emerald-700 border-emerald-100'}`}>
-                        {translations[lang].statusDone}
+                      {/* 💡 뱃지 텍스트 변경: 기본 뷰 vs 고급 뷰 */}
+                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border mb-4 ${
+                        isAdvancedView 
+                          ? 'bg-amber-100 text-amber-800 border-amber-300' 
+                          : isCritical ? 'bg-emerald-900/30 text-emerald-400 border-emerald-800' : 'bg-emerald-50 text-emerald-700 border-emerald-100'
+                      }`}>
+                        {isAdvancedView ? translations[lang].advancedStatus : translations[lang].statusDone}
                       </span>
 
                       {eventProb >= 70 && (
@@ -457,7 +468,7 @@ export default function HomePage() {
                             <p className={`text-xs font-semibold mb-1 ${isCritical ? 'text-slate-400' : 'text-slate-500'}`}>
                               {translations[lang].scoreTitle}
                             </p>
-                            <p className={`text-5xl font-extrabold tracking-tight ${isCritical ? 'text-white' : 'text-slate-800'}`}>
+                            <p className={`text-5xl font-extrabold tracking-tight transition-all duration-500 ${isCritical ? 'text-white' : 'text-slate-800'}`}>
                               {realScore.toFixed(1)}{" "}
                               <span className={`text-xl font-medium ${isCritical ? 'text-slate-600' : 'text-slate-300'}`}>
                                 {translations[lang].scoreOutOf}
@@ -478,9 +489,13 @@ export default function HomePage() {
                   <section className="space-y-6">
                     <div className={`rounded-2xl border px-4 py-4 text-sm ${isCritical ? 'bg-blue-950/30 border-blue-900/50 text-slate-300' : 'bg-blue-50/50 border-blue-100 text-slate-700'}`}>
                       <p className={`mb-2 text-xs font-bold flex items-center gap-1 ${isCritical ? 'text-blue-400' : 'text-blue-600'}`}>
-                        <span>🤖</span> {translations[lang].aiSummaryTitle}
+                        <span>{isAdvancedView ? "🔥" : "🤖"}</span> 
+                        {isAdvancedView ? "카카오 심층 팩트 체크" : translations[lang].aiSummaryTitle}
                       </p>
-                      <p className="leading-relaxed">{aiSummary}</p>
+                      {/* 💡 whitespace-pre-wrap 추가: 엔터(줄바꿈) 예쁘게 렌더링되게! */}
+                      <p className="leading-relaxed whitespace-pre-wrap transition-all duration-500">
+                        {aiSummary}
+                      </p>
                     </div>
 
                     {chartDetails && (
@@ -527,20 +542,65 @@ export default function HomePage() {
                     )}
                   </section>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSearchQuery("");
-                      setShowResult(false);
-                    }}
-                    className={`w-full rounded-xl border px-4 py-3 text-sm font-medium transition shadow-sm ${
-                      isCritical 
-                        ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700' 
-                        : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    {translations[lang].searchAgain}
-                  </button>
+                  {/* 💡 고급 검색 토글 & 다시 검색 버튼 영역 */}
+                  <div className="flex flex-col gap-2">
+                    
+                    {/* 카카오 데이터가 있고, 현재 뷰가 기본(구글) 뷰일 때 고급 검색 버튼 표시 */}
+                    {hasAdvanced && !isAdvancedView && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRealScore(kakaoData.realScore ?? 0);
+                          setEventProb(kakaoData.eventProbability ?? 0);
+                          setAiSummary(kakaoData.aiSummary ?? "");
+                          setChartDetails(kakaoData.details ?? {taste:0, value:0, service:0, time:0});
+                          setIsAdvancedView(true);
+                        }}
+                        className="w-full rounded-xl border border-amber-500 bg-amber-500 px-4 py-3 text-sm font-bold text-white shadow-md transition hover:bg-amber-600 active:scale-95 animate-in zoom-in"
+                      >
+                        {translations[lang].advancedButton}
+                      </button>
+                    )}
+
+                    {/* 현재 뷰가 고급 뷰일 때, 다시 기본(구글) 뷰로 돌아가는 버튼 표시 */}
+                    {isAdvancedView && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (basicData) {
+                            setRealScore(basicData.score);
+                            setEventProb(basicData.eProb);
+                            setAiSummary(basicData.summary);
+                            setChartDetails(basicData.details);
+                          }
+                          setIsAdvancedView(false);
+                        }}
+                        className={`w-full rounded-xl border px-4 py-3 text-sm font-bold shadow-sm transition active:scale-95 ${
+                          isCritical 
+                            ? 'bg-slate-700 border-slate-600 text-slate-200 hover:bg-slate-600' 
+                            : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        {translations[lang].returnBasic}
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery("");
+                        setShowResult(false);
+                      }}
+                      className={`w-full rounded-xl border px-4 py-3 text-sm font-medium transition shadow-sm mt-2 ${
+                        isCritical 
+                          ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700' 
+                          : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      {translations[lang].searchAgain}
+                    </button>
+                  </div>
+
                 </div>
               </div>
 
