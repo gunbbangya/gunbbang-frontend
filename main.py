@@ -15,6 +15,7 @@ from fastapi import BackgroundTasks  # 이거 추가 (기존 FastAPI 줄에 넣�
 from kakao_scraper import get_kakao_place_id, get_deep_kakao_reviews  # 💡 방금 만든 무기 장착!
 import threading  # 💡 [추가] 과부하 방지 신호등용
 import random     # 💡 [추가] 봇 차단 방지용 시간차
+import re
 
 
 load_dotenv()
@@ -164,10 +165,15 @@ def run_kakao_advanced_analysis(query: str, search_keyword: str, address: str, l
                 print(f"🔥 [크롤러 완료] '{search_keyword}' 고급 분석 DB 저장 완료!")
                 
         except Exception as e:
-            print(f"🚨 [크롤러 에러] {e}")
             # 에러 났을 때 무한 '처리중' 상태에 빠지지 않도록 no_data 도장 쾅!
             if collection is not None:
                 collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
+
+def clean_place_name(name):
+    # | ( [ - – 같은 구분 기호가 나오면 그 앞부분만 취함
+    # 예: "브리비트 성수 | 성수 맛집" -> "브리비트 성수"
+    cleaned = re.split(r'[|(\[–-]', name)[0].strip()
+    return cleaned
 
 @app.post("/api/analyze")
 async def analyze_place(request: Request, background_tasks: BackgroundTasks):
@@ -178,15 +184,11 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
 
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
     if query: query = query[:100]
-    address = data.get("address", "")
+    
+    # 프론트에서 보낸 주소 받기
+    address = data.get("address", "") 
     lang = data.get("lang") or "ko"
     
-    # 💡 [방어 1] 만약 유저가 링크(http)를 검색했다면 구글 상호명을, 일반 단어면 유저 검색어를 카카오용 키워드로 사용!
-    kakao_search_keyword = query
-    if query.startswith("http"):
-        # 링크일 경우 뒤에서 구글 검색 후 place_info['name']으로 덮어씌움 (아래쪽 로직 참조)
-        pass 
-
     # 1. DB 캐시 확인
     if collection is not None:
         cached_item = collection.find_one({"name": query})
@@ -200,22 +202,20 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
                     result_data = cached_item[realtime_cache_key]
                     result_data["isNewDiscovery"] = False 
                     
-                    # 💡 [방어 2] 카카오 데이터 상태(status) 확인!
+                    # 카카오 데이터 상태(status) 확인
                     if kakao_cache_key in cached_item:
                         status = cached_item[kakao_cache_key].get("status")
                         if status == "processing" or status == "no_data":
-                            # 처리 중이거나, 애초에 데이터가 없는 식당이면 버튼 숨김 & 요원 파견 안 함!
                             result_data["has_advanced"] = False
                         else:
-                            # 찐 데이터가 있을 때만 프론트로 전송
                             result_data["has_advanced"] = True
                             result_data["kakao_data"] = cached_item[kakao_cache_key]
                     else:
-                        # 아예 긁어본 적도 없는 상태면 요원 파견
                         result_data["has_advanced"] = False
-                        # 💡 파견하기 전에 다른 유저가 못 건드리게 "처리 중" 락 걸기!
                         collection.update_one({"name": query}, {"$set": {kakao_cache_key: {"status": "processing"}}}, upsert=True)
-                        kakao_keyword = place_info['name'] if query.startswith("http") else query
+                        
+                        # 💡 [적용 1] 캐시에 있던 구글 이름(result_data["name"])을 깔끔하게 청소해서 요원 파견!
+                        kakao_keyword = clean_place_name(result_data["name"])
                         background_tasks.add_task(run_kakao_advanced_analysis, query, kakao_keyword, address, lang)
                         
                     return result_data
@@ -224,9 +224,6 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
     
-    # 링크로 검색했을 경우 구글에서 찾아온 이름을 카카오 검색어로 지정
-    kakao_keyword = place_info['name'] if query.startswith("http") else query
-
     try:
         prompt = get_fast_prompt(lang, place_info)
         response = client.chat.completions.create(
@@ -242,16 +239,16 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
         }
         
         if collection is not None:
-            # 💡 [방어 2] 구글 데이터 저장할 때 카카오는 "처리 중"이라고 락을 동시에 걸어버림!
             update_data = {
                 "name": query, 
                 "date": datetime.now().strftime("%Y-%m-%d"), 
                 f"result_{lang}": final_result,
-                f"kakao_result_{lang}": {"status": "processing"} # 요원 출발 전 락 걸기!
+                f"kakao_result_{lang}": {"status": "processing"} 
             }
             collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
         
-        # 💡 유저한테 답 주기 전에 카카오 요원을 뒤로 파견!
+        # 💡 [적용 2] 갓 검색해온 구글 이름(place_info['name'])을 깔끔하게 청소해서 요원 파견!
+        kakao_keyword = clean_place_name(place_info['name'])
         background_tasks.add_task(run_kakao_advanced_analysis, query, kakao_keyword, address, lang)
         
         return final_result
