@@ -11,6 +11,9 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 import certifi
 from openai import OpenAI  # 💡 구글 대신 OpenAI 수입!
+from fastapi import BackgroundTasks  # 이거 추가 (기존 FastAPI 줄에 넣거나 밑에 따로 빼도 됨)
+from kakao_scraper import get_kakao_place_id, get_deep_kakao_reviews  # 💡 방금 만든 무기 장착!
+
 
 load_dotenv()
 
@@ -41,60 +44,30 @@ RATE_LIMIT = 1500
 WINDOW_SECONDS = 86400 # 60초가 아니라 하루(86400초) 기준으로 1500번 체크
 
 # --- 동적 프롬프트 생성 ---
-def get_dynamic_prompt(lang, place_info):
+def get_fast_prompt(lang, place_info):
     if lang == "en":
-        instruction = "You are a 'Cold-blooded Restaurant Profiler'. Evaluate the reviews strictly. DO NOT mention the evaluation criteria, keywords, or your internal process in the summary. Provide only the final, objective critique."
-        guidelines = """
-        [Detection: Review Events & Fake Patterns]
-        1. Identify phrases like "got a free drink/side", "event participation", "review for service".
-        2. Contextual Detection: Even without 'event' keywords, if a 5-star review only praises "kindness" or "cleanliness" without specific details about the food, treat it as a high-probability fake/promotional pattern.
-        3. Suspicious 5.0 stars: Extremely short reviews or emoji-only reviews are considered zero-value data.
-        4. Weighting: Give 1.5x weight to 1~3 star reviews that describe specific issues (hygiene, attitude, price).
-        5. Calculate 'eventProbability' (0~100%): High probability if reviews lack substance or focus solely on non-food factors.
-        
-        [Balanced Scoring Rules]
-        1. Base Score: 3.0. (A decent, average restaurant should land between 2.5 and 3.5). Do not exceed 4.0 unless it's an exceptional spot with overwhelming praise.
-        2. Hard Ceiling: If 'eventProbability' > 70%, the 'realScore' MUST NOT exceed 2.9.
-        3. Proportional Deductions: Do not deduct massively for 1 or 2 isolated bad reviews. Deduct -0.2 to -0.8 for systemic hygiene/rude service issues, and -0.1 to -0.5 for overpriced/long waits, depending on the frequency of these complaints.
-        """
-        json_format = """
-        {
-            "translatedName": "English Name",
-            "translatedAddress": "English Address",
-            "realScore": 1.0~5.0,
-            "eventProbability": 0~100,
-            "aiSummary": "Critical summary focusing on fake patterns and food quality",
-            "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" }
-        }
-        """
+        instruction = "You are a 'Cold-blooded Restaurant Profiler'. Evaluate the reviews strictly."
+        guidelines = "Identify fake patterns. Base score 3.0. Deduct for bad hygiene/service."
+        json_format = '{ "translatedName": "Name", "translatedAddress": "Address", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Critical summary in 2-3 sentences", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
     else:
-        instruction = "당신은 광고성 리뷰를 걸러내는 '냉혹한 미식 프로파일러'입니다. 단, 요약 시 프롬프트에 제시된 판단 기준(이벤트 키워드 유무 등)이나 분석 과정은 절대 언급하지 마세요. 오직 리뷰에서 파악된 식당의 진짜 장단점과 팩트만 냉철하고 객관적으로 요약하세요."
-        guidelines = """
-        [리뷰 이벤트 및 조작 패턴 감지]
-        1. 핵심 키워드 감시: '서비스 받았어요', '이벤트 참여', '음료수 서비스', '사진 리뷰 약속' 등의 문구가 보이면 무조건 'eventProbability'를 높이세요.
-        2. 맥락적 정황 포착: '이벤트'라는 직접적 단어가 없더라도, 음식에 대한 구체적 묘사 없이 "친절해요", "예뻐요" 등 부차적인 칭찬만 나열된 5점 리뷰는 보상형 리뷰일 확률이 높습니다.
-        3. 영혼 없는 5점: 구체적인 설명 없이 이모티콘만 있거나 너무 짧은 5점 리뷰는 '리뷰 이벤트' 정황으로 간주합니다.
-        4. 신뢰도 가중치: 단점을 구체적으로 지적한 1~3점 리뷰에 1.5배의 가중치를 두어 점수를 평가하세요.
-        5. 'eventProbability' 산출: 0~100% 사이의 정수로, 리뷰 이벤트가 의심되는 정도를 계산하세요.
+        instruction = "당신은 광고성 리뷰를 걸러내는 '냉혹한 미식 프로파일러'입니다."
+        guidelines = "리뷰 이벤트 정황(영혼없는 5점, 서비스 언급)을 찾아내고, 기준점 3.0점에서 감점하세요."
+        json_format = '{ "translatedName": "가게 이름", "translatedAddress": "가게 주소", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "리뷰 분석 결과를 핵심만 2~3줄로 짧고 명확하게 요약하세요. (위생, 조작 확률 위주로)", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+    return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nInput Data: Name: {place_info['name']}\nReviews: {' '.join(place_info['reviews'])}"
 
-        [균형 잡힌 채점 기준]
-        1. 기준점: 3.0점. (실패 없는 무난하고 괜찮은 식당은 2.5점~3.5점 사이로 평가하세요). 4.0점 이상은 압도적인 극찬이 다수일 때만 부여합니다.
-        2. 점수 상한선: 'eventProbability'가 70% 이상이면 'realScore'는 최대 2.9점을 넘을 수 없습니다.
-        3. 유연한 감점: 단 1~2개의 악플로 점수를 과도하게 깎지 마세요. 전체 리뷰 중 단점이 차지하는 비율에 따라 감점하세요. 심각한 불친절/위생 문제는 빈도에 따라 -0.2점 ~ -0.8점, 가성비/웨이팅 문제는 -0.1 ~ -0.5점 내에서 유연하게 차감하세요.
-        """
-        json_format = """
-        {
-            "translatedName": "가게 이름",
-            "translatedAddress": "가게 주소",
-            "realScore": 1.0~5.0,
-            "eventProbability": 0~100,
-            "aiSummary": "리뷰 이벤트 정황을 포함한 냉정한 분석",
-            "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" }
-        }
-        """
+def get_deep_prompt(lang, place_name, reviews):
+    reviews_text = "\n".join(reviews)
+    if lang == "en":
+        instruction = "You are a 'Cold-blooded Restaurant Profiler' analyzing 25 deep reviews to uncover the truth."
+        guidelines = "[Detection & Weighting]\n1. High 'eventProbability' for keywords like 'free drink', or if 5-star reviews lack food details.\n2. Give 2x weight to 1~3 star reviews specifying issues.\n3. Ignore blind 5-stars from habitual 5-star reviewers (avg > 4.8).\n[Balanced Scoring Rules]\n4. Base Score: 3.0. Max 2.9 if eventProbability > 70%.\n5. Proportional Deductions: Deduct -0.2 to -0.8 for systemic hygiene/rude service, and -0.1 to -0.5 for overpriced/long waits."
+        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Write in two paragraphs. Paragraph 1 starts with \'🔍 [Reason]\'. Paragraph 2 starts with \'🚨 [Conclusion]\'.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+    else:
+        instruction = "당신은 조작된 평점을 파괴하는 '냉혹한 심층 미식 프로파일러'입니다. 25개의 카카오 리뷰를 분석하세요."
+        guidelines = "[리뷰 이벤트 및 조작 패턴 감지]\n1. '서비스 받았어요' 등 보이면 'eventProbability' 대폭 상승.\n2. 음식 묘사 없이 '친절해요'만 있는 5점은 보상형 의심.\n3. 단점 지적한 1~3점 리뷰에 2배 가중치.\n[🔥 리뷰어 성향 판별법]\n4. 깐깐한 미식가(평균 3.5 이하)의 5점은 가중치 UP, 습관성 만점자(평균 4.8 이상)의 영혼 없는 5점은 무시.\n[균형 잡힌 채점 기준]\n5. 기준점 3.0점. 상한선: eventProbability 70% 이상이면 최대 2.9점.\n6. 유연한 감점: 전체 리뷰 중 단점 비율 고려. 빈도에 따라 위생/불친절(-0.2~-0.8), 가성비/웨이팅(-0.1~-0.5) 차감."
+        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "반드시 두 문단으로 작성. 첫 문단은 \'🔍 [분석 근거]\'로 시작하여 구체적 이유(위생 문제 빈도, 조작 정황 등) 서술, 두 번째 문단은 줄바꿈 후 \'🚨 [최종 결론]\'으로 시작하여 평가.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+    return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nTarget: {place_name}\nReviews: {reviews_text}"
 
-    return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nInput Data: Name: {place_info['name']}, Address: {place_info['address']}\nReviews: {' '.join(place_info['reviews'])}"
-    
+
 app = FastAPI()
 
 # --- 미들웨어: Rate Limit ---
@@ -147,91 +120,90 @@ def search_places(q: str, request: Request):
         }]
     except: return []
 
+def run_kakao_advanced_analysis(query: str, place_name: str, lang: str):
+    print(f"🏃‍♂️ [백그라운드] '{place_name}' 카카오 심층 분석 시작...")
+    
+    place_id = get_kakao_place_id(place_name)
+    if not place_id: return
+
+    reviews = get_deep_kakao_reviews(place_id)
+    if len(reviews) < 5: return
+
+    try:
+        prompt = get_deep_prompt(lang, place_name, reviews)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini", response_format={ "type": "json_object" },
+            messages=[{"role": "system", "content": "You are a JSON generating assistant."}, {"role": "user", "content": prompt}]
+        )
+        ai_data = json.loads(response.choices[0].message.content)
+        
+        if collection is not None:
+            collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": ai_data}})
+            print(f"🔥 [백그라운드 완료] '{place_name}' 고급 분석 DB 저장 완료!")
+    except Exception as e:
+        print(f"🚨 심층 분석 에러: {e}")
+
 @app.post("/api/analyze")
-async def analyze_place(request: Request):
+async def analyze_place(request: Request, background_tasks: BackgroundTasks): # 💡 인자에 이거 꼭 추가!
     global last_queries
     client_ip = request.client.host
-    try:
-        data = await request.json()
+    try: data = await request.json()
     except: data = {}
 
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
-    if query:
-        query = query[:100]
-        
+    if query: query = query[:100]
     lang = data.get("lang") or "ko"
     
-    already_existed = False 
-    
+    # 1. DB 캐시 확인 (카카오 결과가 있으면 같이 보냄)
     if collection is not None:
         cached_item = collection.find_one({"name": query})
-        
         if cached_item:
-            already_existed = True 
-            
-            builder_cache_key = f"analysis_{lang}"
-            if builder_cache_key in cached_item and cached_item[builder_cache_key]:
-                return {
-                    **cached_item[builder_cache_key],
-                    "name": cached_item.get("name", query),
-                    "address": cached_item.get("address", ""),
-                    "rating": 0,
-                    "isNewDiscovery": False  
-                }
-                
             realtime_cache_key = f"result_{lang}"
+            kakao_cache_key = f"kakao_result_{lang}"
+            
             if realtime_cache_key in cached_item and cached_item[realtime_cache_key]:
                 cache_date = datetime.strptime(cached_item["date"], "%Y-%m-%d")
-                
                 if datetime.now() - cache_date < timedelta(days=30):
-                    print(f"⚡ [DB 적중] '{query}' - 최근 30일 내 검색 기록 반환!")
                     result_data = cached_item[realtime_cache_key]
                     result_data["isNewDiscovery"] = False 
+                    
+                    if kakao_cache_key in cached_item:
+                        result_data["has_advanced"] = True
+                        result_data["kakao_data"] = cached_item[kakao_cache_key]
+                    else:
+                        result_data["has_advanced"] = False
+                        background_tasks.add_task(run_kakao_advanced_analysis, query, result_data["name"], lang)
+                        
                     return result_data
-                else:
-                    print(f"🔄 [DB 갱신] '{query}' - 30일이 지나 최신 데이터로 다시 검색합니다.")
 
-    print(f"🔍 [실시간 분석] '{query}' AI 가동 중 (OpenAI 사용)...")
+    # 2. 캐시 없으면 실시간 구글 분석 (빠른 요약)
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
 
-    # 💡 [핵심] 구글 모델 돌려막기 삭제하고, 가장 똑똑한 OpenAI 하나로 직진!
     try:
-        prompt = get_dynamic_prompt(lang, place_info)
-        
+        prompt = get_fast_prompt(lang, place_info)
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={ "type": "json_object" }, # 무조건 JSON으로 대답하게 강제!
-            messages=[
-                {"role": "system", "content": "You are a JSON generating assistant."},
-                {"role": "user", "content": prompt}
-            ]
+            model="gpt-4o-mini", response_format={ "type": "json_object" },
+            messages=[{"role": "system", "content": "You are a JSON generating assistant."}, {"role": "user", "content": prompt}]
         )
-        
-        ai_text = response.choices[0].message.content
-        ai_data = json.loads(ai_text)
+        ai_data = json.loads(response.choices[0].message.content)
         
         final_result = {
-            **ai_data, 
-            "name": ai_data.get("translatedName") or place_info['name'], 
+            **ai_data, "name": ai_data.get("translatedName") or place_info['name'], 
             "address": ai_data.get("translatedAddress") or place_info['address'], 
-            "rating": place_info['rating']
+            "rating": place_info['rating'], "isNewDiscovery": True, "has_advanced": False
         }
         
         if collection is not None:
-            update_data = {
-                "name": query,
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                f"result_{lang}": final_result
-            }
+            update_data = {"name": query, "date": datetime.now().strftime("%Y-%m-%d"), f"result_{lang}": final_result}
             collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
-            print(f"💾 [DB 저장] '{query}' 최신 분석 결과 저장 완료!")
         
-        final_result["isNewDiscovery"] = not already_existed 
+        # 💡 유저한테 답 주기 전에 카카오 요원을 뒤로 파견!
+        background_tasks.add_task(run_kakao_advanced_analysis, query, place_info['name'], lang)
+        
         return final_result
 
     except Exception as e:
-        print(f"🚨 [OpenAI 뻗음] 이유: {str(e)}")
         raise HTTPException(status_code=500, detail="분석 실패")
 
 # ==========================================
