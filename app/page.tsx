@@ -507,6 +507,7 @@ export default function HomePage() {
                           )}
                         </>
                       )}
+                    </div>
 
                     <div className={`rounded-xl border p-3 text-xs space-y-1.5 mt-4 ${isCritical ? 'bg-slate-800/50 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-100 text-slate-600'}`}>
                       <p>👑 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>4.0+</strong> : {translations[lang].legend4}</p>
