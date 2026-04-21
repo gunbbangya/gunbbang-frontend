@@ -275,7 +275,7 @@ export default function HomePage() {
         const response = await fetch("https://gunbbang-backend.onrender.com/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: query, lang }),
+          body: JSON.stringify({ query: query, address: place.address, lang }),
         });
 
         if (response.status === 429) {

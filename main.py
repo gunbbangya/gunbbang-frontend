@@ -13,6 +13,8 @@ import certifi
 from openai import OpenAI  # 💡 구글 대신 OpenAI 수입!
 from fastapi import BackgroundTasks  # 이거 추가 (기존 FastAPI 줄에 넣거나 밑에 따로 빼도 됨)
 from kakao_scraper import get_kakao_place_id, get_deep_kakao_reviews  # 💡 방금 만든 무기 장착!
+import threading  # 💡 [추가] 과부하 방지 신호등용
+import random     # 💡 [추가] 봇 차단 방지용 시간차
 
 
 load_dotenv()
@@ -120,31 +122,55 @@ def search_places(q: str, request: Request):
         }]
     except: return []
 
-def run_kakao_advanced_analysis(query: str, place_name: str, lang: str):
-    print(f"🏃‍♂️ [백그라운드] '{place_name}' 카카오 심층 분석 시작...")
+crawler_semaphore = threading.Semaphore(2)
+
+def run_kakao_advanced_analysis(query: str, search_keyword: str, address: str, lang: str):
+    print(f"🚦 [크롤러 대기열] '{search_keyword}' 순서 대기 중...")
     
-    place_id = get_kakao_place_id(place_name)
-    if not place_id: return
-
-    reviews = get_deep_kakao_reviews(place_id)
-    if len(reviews) < 5: return
-
-    try:
-        prompt = get_deep_prompt(lang, place_name, reviews)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini", response_format={ "type": "json_object" },
-            messages=[{"role": "system", "content": "You are a JSON generating assistant."}, {"role": "user", "content": prompt}]
-        )
-        ai_data = json.loads(response.choices[0].message.content)
+    # 💡 신호등이 파란불일 때만 진입 (동시 실행 제한)
+    with crawler_semaphore:
+        # 카카오 봇 차단 방지를 위해 출발 전 1~3초 랜덤 대기
+        time.sleep(random.uniform(1, 3))
+        print(f"🏃‍♂️ [크롤러 출동] '{search_keyword}' 분석 시작!")
         
-        if collection is not None:
-            collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": ai_data}})
-            print(f"🔥 [백그라운드 완료] '{place_name}' 고급 분석 DB 저장 완료!")
-    except Exception as e:
-        print(f"🚨 심층 분석 에러: {e}")
+        try:
+            # 💡 [방어 1] 주소(address)까지 같이 넘겨서 동명이인 가게 걸러내기!
+            place_id = get_kakao_place_id(search_keyword, address)
+            
+            if not place_id: 
+                print(f"🚨 [크롤러 중단] 카카오맵에서 '{search_keyword}' 못 찾음")
+                # 무한 재시도 방지: DB에 "no_data" 도장 쾅!
+                if collection is not None:
+                    collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
+                return
+
+            reviews = get_deep_kakao_reviews(place_id)
+            if len(reviews) < 5: 
+                print(f"🚨 [크롤러 중단] '{search_keyword}' 카카오 리뷰 부족 ({len(reviews)}개)")
+                if collection is not None:
+                    collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
+                return
+
+            # 정상적으로 리뷰를 가져왔다면 OpenAI 분석
+            prompt = get_deep_prompt(lang, search_keyword, reviews)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini", response_format={ "type": "json_object" },
+                messages=[{"role": "system", "content": "You are a JSON generating assistant."}, {"role": "user", "content": prompt}]
+            )
+            ai_data = json.loads(response.choices[0].message.content)
+            
+            if collection is not None:
+                collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": ai_data}})
+                print(f"🔥 [크롤러 완료] '{search_keyword}' 고급 분석 DB 저장 완료!")
+                
+        except Exception as e:
+            print(f"🚨 [크롤러 에러] {e}")
+            # 에러 났을 때 무한 '처리중' 상태에 빠지지 않도록 no_data 도장 쾅!
+            if collection is not None:
+                collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
 
 @app.post("/api/analyze")
-async def analyze_place(request: Request, background_tasks: BackgroundTasks): # 💡 인자에 이거 꼭 추가!
+async def analyze_place(request: Request, background_tasks: BackgroundTasks):
     global last_queries
     client_ip = request.client.host
     try: data = await request.json()
@@ -152,9 +178,16 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks): # 
 
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
     if query: query = query[:100]
+    address = data.get("address", "")
     lang = data.get("lang") or "ko"
     
-    # 1. DB 캐시 확인 (카카오 결과가 있으면 같이 보냄)
+    # 💡 [방어 1] 만약 유저가 링크(http)를 검색했다면 구글 상호명을, 일반 단어면 유저 검색어를 카카오용 키워드로 사용!
+    kakao_search_keyword = query
+    if query.startswith("http"):
+        # 링크일 경우 뒤에서 구글 검색 후 place_info['name']으로 덮어씌움 (아래쪽 로직 참조)
+        pass 
+
+    # 1. DB 캐시 확인
     if collection is not None:
         cached_item = collection.find_one({"name": query})
         if cached_item:
@@ -167,18 +200,32 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks): # 
                     result_data = cached_item[realtime_cache_key]
                     result_data["isNewDiscovery"] = False 
                     
+                    # 💡 [방어 2] 카카오 데이터 상태(status) 확인!
                     if kakao_cache_key in cached_item:
-                        result_data["has_advanced"] = True
-                        result_data["kakao_data"] = cached_item[kakao_cache_key]
+                        status = cached_item[kakao_cache_key].get("status")
+                        if status == "processing" or status == "no_data":
+                            # 처리 중이거나, 애초에 데이터가 없는 식당이면 버튼 숨김 & 요원 파견 안 함!
+                            result_data["has_advanced"] = False
+                        else:
+                            # 찐 데이터가 있을 때만 프론트로 전송
+                            result_data["has_advanced"] = True
+                            result_data["kakao_data"] = cached_item[kakao_cache_key]
                     else:
+                        # 아예 긁어본 적도 없는 상태면 요원 파견
                         result_data["has_advanced"] = False
-                        background_tasks.add_task(run_kakao_advanced_analysis, query, result_data["name"], lang)
+                        # 💡 파견하기 전에 다른 유저가 못 건드리게 "처리 중" 락 걸기!
+                        collection.update_one({"name": query}, {"$set": {kakao_cache_key: {"status": "processing"}}}, upsert=True)
+                        kakao_keyword = place_info['name'] if query.startswith("http") else query
+                        background_tasks.add_task(run_kakao_advanced_analysis, query, kakao_keyword, address, lang)
                         
                     return result_data
 
     # 2. 캐시 없으면 실시간 구글 분석 (빠른 요약)
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
+    
+    # 링크로 검색했을 경우 구글에서 찾아온 이름을 카카오 검색어로 지정
+    kakao_keyword = place_info['name'] if query.startswith("http") else query
 
     try:
         prompt = get_fast_prompt(lang, place_info)
@@ -195,11 +242,17 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks): # 
         }
         
         if collection is not None:
-            update_data = {"name": query, "date": datetime.now().strftime("%Y-%m-%d"), f"result_{lang}": final_result}
+            # 💡 [방어 2] 구글 데이터 저장할 때 카카오는 "처리 중"이라고 락을 동시에 걸어버림!
+            update_data = {
+                "name": query, 
+                "date": datetime.now().strftime("%Y-%m-%d"), 
+                f"result_{lang}": final_result,
+                f"kakao_result_{lang}": {"status": "processing"} # 요원 출발 전 락 걸기!
+            }
             collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
         
         # 💡 유저한테 답 주기 전에 카카오 요원을 뒤로 파견!
-        background_tasks.add_task(run_kakao_advanced_analysis, query, place_info['name'], lang)
+        background_tasks.add_task(run_kakao_advanced_analysis, query, kakao_keyword, address, lang)
         
         return final_result
 
