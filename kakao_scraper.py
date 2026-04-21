@@ -7,7 +7,7 @@ from playwright.sync_api import sync_playwright
 load_dotenv()
 KAKAO_API_KEY = os.getenv("KAKAO_API_KEY")
 
-# 💡 [수정됨] 구글 주소(google_address)를 같이 받아서 비교합니다!
+# 1. 구글 주소(google_address)를 같이 받아서 비교합니다!
 def get_kakao_place_id(place_name: str, google_address: str):
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
@@ -75,7 +75,7 @@ def get_deep_kakao_reviews(place_id: str):
             }""")
             
             if extracted_reviews:
-                # 💡 심층 분석을 위해 15개 -> 25개로 늘렸습니다!
+                # 💡 심층 분석을 위해 25개로 추출!
                 for text in extracted_reviews[:25]: 
                     clean_text = " ".join(text.split('\n')) 
                     reviews.append(clean_text)

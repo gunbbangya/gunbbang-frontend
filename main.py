@@ -1,33 +1,28 @@
 import os
 import json
 import time
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from scraper import search_and_get_reviews 
 from dotenv import load_dotenv
 from pymongo import MongoClient
 import certifi
-from openai import OpenAI  # 💡 구글 대신 OpenAI 수입!
-from fastapi import BackgroundTasks  # 이거 추가 (기존 FastAPI 줄에 넣거나 밑에 따로 빼도 됨)
-from kakao_scraper import get_kakao_place_id, get_deep_kakao_reviews  # 💡 방금 만든 무기 장착!
-import threading  # 💡 [추가] 과부하 방지 신호등용
-import random     # 💡 [추가] 봇 차단 방지용 시간차
-import re
-
+from openai import OpenAI
+import threading
+import random
+from kakao_scraper import get_kakao_place_id, get_deep_kakao_reviews 
 
 load_dotenv()
 
 # ==========================================
-# 💡 OpenAI 클라이언트 설정 (.env의 OPENAI_API_KEY 사용)
+# 💡 OpenAI & MongoDB 설정
 # ==========================================
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ==========================================
-# 💡 MongoDB 클라우드 연결 설정
-# ==========================================
 MONGO_URI = os.getenv("MONGO_URI")
 try:
     mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
@@ -35,45 +30,62 @@ try:
     collection = db["places_cache"]
     print("✅ MongoDB 클라우드 연결 성공!")
 except Exception as e:
-    print(f"🚨 MongoDB 연결 실패 (URI를 확인하세요): {e}")
+    print(f"🚨 MongoDB 연결 실패: {e}")
     collection = None
 
 last_queries = {} 
-
-# --- Rate Limit 설정 ---
 user_requests = defaultdict(list)
-# 💡 사용자님의 요청대로 하루 검색 기회를 시원하게 1500번으로 늘렸습니다!
 RATE_LIMIT = 1500 
-WINDOW_SECONDS = 86400 # 60초가 아니라 하루(86400초) 기준으로 1500번 체크
+WINDOW_SECONDS = 86400
 
-# --- 동적 프롬프트 생성 ---
+# ==========================================
+# 💡 프롬프트 설정 ('파괴'라는 단어 삭제, 점수 낮추기로 완화)
+# ==========================================
 def get_fast_prompt(lang, place_info):
     if lang == "en":
-        instruction = "You are a 'Cold-blooded Restaurant Profiler'. Evaluate the reviews strictly."
-        guidelines = "Identify fake patterns. Base score 3.0. Deduct for bad hygiene/service."
-        json_format = '{ "translatedName": "Name", "translatedAddress": "Address", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Critical summary in 2-3 sentences", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        instruction = "You are a 'First-Line Fake Review Detector' analyzing 5 recent reviews. Base score is 2.5."
+        guidelines = "[Detection Logic]\n1. Pattern Recognition: If multiple reviews share identical hashtags or specific keywords (e.g., 'date spot'), suspect a review event.\n2. Fatal Flaw: Even if positive reviews exist, if 1 review points out a 'fatal flaw' (hygiene, extreme rudeness), significantly lower the score.\n3. Scoring: 2.5 is a solid, no-fail spot. 3.0 is a local gem. 4.0 is a national tier. Set 'eventProbability' high if manipulation patterns are detected."
+        json_format = '{ "translatedName": "Name", "translatedAddress": "Address", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "1-2 sentence summary: Focus on fake patterns and whether there is a fatal experience-breaker.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
     else:
-        instruction = "당신은 광고성 리뷰를 걸러내는 '냉혹한 미식 프로파일러'입니다."
-        guidelines = "리뷰 이벤트 정황(영혼없는 5점, 서비스 언급)을 찾아내고, 기준점 3.0점에서 감점하세요."
-        json_format = '{ "translatedName": "가게 이름", "translatedAddress": "가게 주소", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "리뷰 분석 결과를 핵심만 2~3줄로 짧고 명확하게 요약하세요. (위생, 조작 확률 위주로)", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        instruction = "당신은 5개의 리뷰에서 조작 패턴을 찾아내는 '1차 필터링 요원'입니다. 기준점은 2.5점입니다."
+        guidelines = """
+        [🔍 1차 방어선 감지 논리]
+        1. 앵무새 패턴 감지: 특정 키워드나 해시태그가 반복되면 '보상형 리뷰'로 간주하고 조작 확률(eventProbability)을 대폭 높이세요.
+        2. 치명적 결함(Fatal Flaw): 다른 칭찬이 많더라도 단 한 명이라도 위생이나 서비스에서 '경험을 완전히 망치는 치명적 문제'를 지적했다면 전체 평점을 크게 낮추세요.
+        3. 점수 체계: 2.5점은 '실패 없는 집(평균)', 3.0점은 '검증된 맛집', 4.0점은 '전국구 맛집'입니다.
+        """
+        json_format = '{ "translatedName": "가게 이름", "translatedAddress": "가게 주소", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "리뷰 조작 가능성과 치명적 단점 여부를 중심으로 1~2줄 요약하세요.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+    
     return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nInput Data: Name: {place_info['name']}\nReviews: {' '.join(place_info['reviews'])}"
 
 def get_deep_prompt(lang, place_name, reviews):
     reviews_text = "\n".join(reviews)
     if lang == "en":
-        instruction = "You are a 'Cold-blooded Restaurant Profiler' analyzing 25 deep reviews to uncover the truth."
-        guidelines = "[Detection & Weighting]\n1. High 'eventProbability' for keywords like 'free drink', or if 5-star reviews lack food details.\n2. Give 2x weight to 1~3 star reviews specifying issues.\n3. Ignore blind 5-stars from habitual 5-star reviewers (avg > 4.8).\n[Balanced Scoring Rules]\n4. Base Score: 3.0. Max 2.9 if eventProbability > 70%.\n5. Proportional Deductions: Deduct -0.2 to -0.8 for systemic hygiene/rude service, and -0.1 to -0.5 for overpriced/long waits."
-        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Write in two paragraphs. Paragraph 1 starts with \'🔍 [Reason]\'. Paragraph 2 starts with \'🚨 [Conclusion]\'.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        instruction = "You are a 'Chief Culinary Profiler' analyzing 25 raw reviews. Base score is 2.5."
+        guidelines = """
+        [Deep Analysis Logic]
+        1. Reviewer Profiling: Trust the 'strict critics' (avg score < 3.5). A 5-star from them is a real deal.
+        2. Fatal Flaw Rule: Even if most reviews are positive, if there is a 'fatal flaw' (dirty environment, excessive waiting, staff hostility), lower the score significantly. One clear fatal issue is enough to lower the overall rating.
+        3. Scoring: 2.5 is 'Good/No-Fail'. 3.0 is 'Excellent/Local Gem'. 4.0 is 'Legendary/National Tier'.
+        4. Practical Tip: Extract one concrete tip (e.g., parking, hidden menu, best seats).
+        """
+        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Para 1 (🔍 [Analysis]): Deep dive into reviewer credibility and fatal flaws. Para 2 (💡 [Visitor Tip]): One practical, actionable tip.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
     else:
-        instruction = "당신은 조작된 평점을 파괴하는 '냉혹한 심층 미식 프로파일러'입니다. 25개의 카카오 리뷰를 분석하세요."
-        guidelines = "[리뷰 이벤트 및 조작 패턴 감지]\n1. '서비스 받았어요' 등 보이면 'eventProbability' 대폭 상승.\n2. 음식 묘사 없이 '친절해요'만 있는 5점은 보상형 의심.\n3. 단점 지적한 1~3점 리뷰에 2배 가중치.\n[🔥 리뷰어 성향 판별법]\n4. 깐깐한 미식가(평균 3.5 이하)의 5점은 가중치 UP, 습관성 만점자(평균 4.8 이상)의 영혼 없는 5점은 무시.\n[균형 잡힌 채점 기준]\n5. 기준점 3.0점. 상한선: eventProbability 70% 이상이면 최대 2.9점.\n6. 유연한 감점: 전체 리뷰 중 단점 비율 고려. 빈도에 따라 위생/불친절(-0.2~-0.8), 가성비/웨이팅(-0.1~-0.5) 차감."
-        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "반드시 두 문단으로 작성. 첫 문단은 \'🔍 [분석 근거]\'로 시작하여 구체적 이유(위생 문제 빈도, 조작 정황 등) 서술, 두 번째 문단은 줄바꿈 후 \'🚨 [최종 결론]\'으로 시작하여 평가.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        instruction = "당신은 25개의 카카오 리뷰를 해부하는 '전문 미식 프로파일러'입니다. 기준점은 2.5점입니다."
+        guidelines = """
+        [💡 전문 분석가 감지 논리]
+        1. 리뷰어 성향 파악: 평균 별점이 낮은 '엄격한 리뷰어'의 평가에 높은 가중치를 두세요. 단순히 좋다는 말보다 구체적인 맛의 묘사를 신뢰하세요.
+        2. 치명적 단점 반영(Fatal Flaw): 아무리 평점 평균이 높아도, 위생 상태나 직원의 태도 등에서 치명적인 문제가 발견되면 점수를 대폭 삭감하세요. 단 한 건이라도 사실로 확인되는 치명적 단점은 대폭 감점의 근거가 됩니다.
+        3. 점수 체계: 2.5점은 '실패 없는 괜찮은 집', 3.0점은 '정말 훌륭한 찐맛집', 4.0점은 '전국에서 찾아갈 만한 인생 맛집'입니다.
+        4. 실전 꿀팁: 사용자가 방문 전 반드시 알아야 할 팁(주차, 대기 시간, 추천 메뉴 등)을 추출하세요.
+        """
+        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "두 문단 작성. 첫 문단은 \'🔍 [심층 분석]\'으로 시작하여 리뷰어의 신뢰도와 치명적 단점 유무를 파악해 결론 도출. 두 번째 문단은 줄바꿈 후 \'💡 [실전 꿀팁]\'으로 시작하여 유용한 정보 한 줄 제공.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+    
     return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nTarget: {place_name}\nReviews: {reviews_text}"
 
 
 app = FastAPI()
 
-# --- 미들웨어: Rate Limit ---
 @app.middleware("http")
 async def limit_requests(request: Request, call_next):
     if request.url.path == "/api/analyze":
@@ -89,7 +101,6 @@ async def limit_requests(request: Request, call_next):
         user_requests[client_ip].append(now)
     return await call_next(request)
 
-# --- 미들웨어: CORS ---
 ALLOWED_ORIGINS = [
     "https://gunbbang-frontend.vercel.app", 
     "http://localhost:3000",        
@@ -123,24 +134,20 @@ def search_places(q: str, request: Request):
         }]
     except: return []
 
+# 💡 [방어] 한 번에 최대 2개의 크롤러만 동작
 crawler_semaphore = threading.Semaphore(2)
 
 def run_kakao_advanced_analysis(query: str, search_keyword: str, address: str, lang: str):
     print(f"🚦 [크롤러 대기열] '{search_keyword}' 순서 대기 중...")
     
-    # 💡 신호등이 파란불일 때만 진입 (동시 실행 제한)
     with crawler_semaphore:
-        # 카카오 봇 차단 방지를 위해 출발 전 1~3초 랜덤 대기
         time.sleep(random.uniform(1, 3))
         print(f"🏃‍♂️ [크롤러 출동] '{search_keyword}' 분석 시작!")
         
         try:
-            # 💡 [방어 1] 주소(address)까지 같이 넘겨서 동명이인 가게 걸러내기!
             place_id = get_kakao_place_id(search_keyword, address)
-            
             if not place_id: 
                 print(f"🚨 [크롤러 중단] 카카오맵에서 '{search_keyword}' 못 찾음")
-                # 무한 재시도 방지: DB에 "no_data" 도장 쾅!
                 if collection is not None:
                     collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
                 return
@@ -152,7 +159,6 @@ def run_kakao_advanced_analysis(query: str, search_keyword: str, address: str, l
                     collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
                 return
 
-            # 정상적으로 리뷰를 가져왔다면 OpenAI 분석
             prompt = get_deep_prompt(lang, search_keyword, reviews)
             response = client.chat.completions.create(
                 model="gpt-4o-mini", response_format={ "type": "json_object" },
@@ -165,13 +171,11 @@ def run_kakao_advanced_analysis(query: str, search_keyword: str, address: str, l
                 print(f"🔥 [크롤러 완료] '{search_keyword}' 고급 분석 DB 저장 완료!")
                 
         except Exception as e:
-            # 에러 났을 때 무한 '처리중' 상태에 빠지지 않도록 no_data 도장 쾅!
             if collection is not None:
                 collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
 
 def clean_place_name(name):
     # | ( [ - – 같은 구분 기호가 나오면 그 앞부분만 취함
-    # 예: "브리비트 성수 | 성수 맛집" -> "브리비트 성수"
     cleaned = re.split(r'[|(\[–-]', name)[0].strip()
     return cleaned
 
@@ -185,11 +189,9 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
     query = data.get("query") or data.get("id") or data.get("place_name") or last_queries.get(client_ip)
     if query: query = query[:100]
     
-    # 프론트에서 보낸 주소 받기
     address = data.get("address", "") 
     lang = data.get("lang") or "ko"
     
-    # 1. DB 캐시 확인
     if collection is not None:
         cached_item = collection.find_one({"name": query})
         if cached_item:
@@ -202,7 +204,6 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
                     result_data = cached_item[realtime_cache_key]
                     result_data["isNewDiscovery"] = False 
                     
-                    # 카카오 데이터 상태(status) 확인
                     if kakao_cache_key in cached_item:
                         status = cached_item[kakao_cache_key].get("status")
                         if status == "processing" or status == "no_data":
@@ -214,13 +215,11 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
                         result_data["has_advanced"] = False
                         collection.update_one({"name": query}, {"$set": {kakao_cache_key: {"status": "processing"}}}, upsert=True)
                         
-                        # 💡 [적용 1] 캐시에 있던 구글 이름(result_data["name"])을 깔끔하게 청소해서 요원 파견!
                         kakao_keyword = clean_place_name(result_data["name"])
                         background_tasks.add_task(run_kakao_advanced_analysis, query, kakao_keyword, address, lang)
                         
                     return result_data
 
-    # 2. 캐시 없으면 실시간 구글 분석 (빠른 요약)
     place_info = search_and_get_reviews(query)
     if not place_info: raise HTTPException(status_code=404)
     
@@ -247,7 +246,6 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
             }
             collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
         
-        # 💡 [적용 2] 갓 검색해온 구글 이름(place_info['name'])을 깔끔하게 청소해서 요원 파견!
         kakao_keyword = clean_place_name(place_info['name'])
         background_tasks.add_task(run_kakao_advanced_analysis, query, kakao_keyword, address, lang)
         
@@ -256,9 +254,6 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
     except Exception as e:
         raise HTTPException(status_code=500, detail="분석 실패")
 
-# ==========================================
-# 💡 [지도 기능 1] 3.5점 이상일 때 깃발 저장하기 (POST)
-# ==========================================
 @app.post("/api/map-flags")
 async def save_map_flag(request: Request):
     if collection is None:
@@ -270,7 +265,7 @@ async def save_map_flag(request: Request):
         address = data.get("address")
         score = data.get("score")
         aiSummary = data.get("aiSummary") 
-        details = data.get("details")     
+        details = data.get("details")    
 
         if not name or score is None:
             raise HTTPException(status_code=400, detail="데이터 부족")
@@ -295,9 +290,6 @@ async def save_map_flag(request: Request):
         print("🚨 깃발 저장 에러:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==========================================
-# 💡 [지도 기능 2] DB에서 3.5점 이상 깃발들 가져오기 (GET)
-# ==========================================
 @app.get("/api/map-flags")
 def get_map_flags():
     if collection is None:

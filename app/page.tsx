@@ -94,7 +94,7 @@ const translations: Record<
     limitExceeded: "오늘 할당된 15회의 분석 에너지를 모두 소모했습니다. 내일 다시 찾아주세요!",
     overloadError: "현재 접속자가 많아 AI가 과부하 상태입니다. 약 1분 후 다시 시도해 주세요!",
     energyLabel: "오늘의 분석 에너지",
-    advancedButton: "🔥 찐뷰 고급 검색 (카카오 리뷰 25개 심층 분석)",
+    advancedButton: "🔥 고급 심층 분석 보기",
     returnBasic: "↩️ 구글 기본 요약으로 돌아가기",
     advancedStatus: "🔥 심층 분석 완료",
   },
@@ -140,7 +140,7 @@ const translations: Record<
     limitExceeded: "You have used all 15 analysis energies for today. Please come back tomorrow!",
     overloadError: "AI is currently overloaded. Please try again in about 1 minute!",
     energyLabel: "Daily Energy",
-    advancedButton: "🔥 Deep Search (Analyze 25 Kakao Reviews)",
+    advancedButton: "🔥 View Advanced Deep Analysis",
     returnBasic: "↩️ Return to Basic Google Summary",
     advancedStatus: "🔥 Deep Analysis Complete",
   },
@@ -183,6 +183,11 @@ export default function HomePage() {
   const [userDailyCount, setUserDailyCount] = useState(0);
 
   const isCritical = showResult && realScore !== null && realScore <= 2.4;
+
+  const googleScore = basicData?.score ?? 0;
+  const kakaoScore = kakaoData?.realScore ?? 0;
+  const scoreDiff = parseFloat((googleScore - kakaoScore).toFixed(1));
+
 
   const setLanguage = (nextLang: Lang) => {
     setLang(nextLang);
@@ -429,7 +434,7 @@ export default function HomePage() {
 
               <div className="px-4 pt-8 sm:px-6 sm:pt-10">
                 <div className="space-y-8">
-                  <header className="space-y-4">
+                 <header className="space-y-4">
                     <div>
                       {/* 💡 뱃지 텍스트 변경: 기본 뷰 vs 고급 뷰 */}
                       <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border mb-4 ${
@@ -440,6 +445,7 @@ export default function HomePage() {
                         {isAdvancedView ? translations[lang].advancedStatus : translations[lang].statusDone}
                       </span>
 
+                      {/* 💡 1. 구글 패턴 분석 기반 가짜 리뷰 경고 (기존 로직) */}
                       {eventProb >= 70 && (
                         <div className="mb-6 rounded-xl border-2 border-dashed border-red-500/60 bg-red-950/40 p-4 animate-in zoom-in duration-500">
                           <div className="flex items-start sm:items-center gap-3">
@@ -455,29 +461,52 @@ export default function HomePage() {
                           </div>
                        </div>
                       )}
-
-                      {typeof realScore === "number" && (
-                        <div className="flex flex-col gap-2">
-                          {realScore >= 4.0 && (
-                            <div className="self-start mb-1 inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-red-500 to-orange-500 px-3 py-1.5 text-sm font-extrabold text-white shadow-md animate-pulse">
-                              <span>🏆</span> {translations[lang].trophyText}
+                    
+{/* 💡 [새로 추가] 기본 검색 화면에서 보여주는 '고급 검색 점수 차이' 배너 */}
+{!isAdvancedView && kakaoData && (
+                        <>
+                          {/* 거품 감지 (구글이 1.0점 이상 높음 -> 빨간색) */}
+                          {scoreDiff >= 1.0 && (
+                            <div className="mb-6 rounded-xl border-2 border-red-400 bg-red-50 px-4 py-3 text-red-800 animate-in zoom-in duration-500 shadow-sm">
+                              <div className="flex items-center gap-2.5">
+                                <span className="text-xl">🚨</span>
+                                <p className="text-sm font-bold">
+                                  {lang === "ko" ? `고급 분석 결과와 ${scoreDiff.toFixed(1)}점 차이납니다.` : `${scoreDiff.toFixed(1)} points diff from advanced analysis.`}
+                                </p>
+                              </div>
                             </div>
                           )}
 
-                          <div>
-                            <p className={`text-xs font-semibold mb-1 ${isCritical ? 'text-slate-400' : 'text-slate-500'}`}>
-                              {translations[lang].scoreTitle}
-                            </p>
-                            <p className={`text-5xl font-extrabold tracking-tight transition-all duration-500 ${isCritical ? 'text-white' : 'text-slate-800'}`}>
-                              {realScore.toFixed(1)}{" "}
-                              <span className={`text-xl font-medium ${isCritical ? 'text-slate-600' : 'text-slate-300'}`}>
-                                {translations[lang].scoreOutOf}
-                              </span>
-                            </p>
-                          </div>
-                        </div>
+                          {/* 거품 의심 (구글이 0.6 ~ 0.9점 높음 -> 노란색) */}
+                          {scoreDiff >= 0.6 && scoreDiff < 1.0 && (
+                            <div className="mb-6 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 text-amber-800 animate-in zoom-in duration-500 shadow-sm">
+                              <div className="flex items-center gap-2.5">
+                                <span className="text-xl">⚠️</span>
+                                <p className="text-sm font-bold">
+                                  {lang === "ko" ? `고급 분석 결과와 ${scoreDiff.toFixed(1)}점 차이납니다.` : `${scoreDiff.toFixed(1)} points diff from advanced analysis.`}
+                                </p>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* 숨은 찐맛집 (카카오 점수가 오히려 더 높음 -> 파란색) */}
+                          {scoreDiff < 0 && (
+                            <div className="mb-6 rounded-xl border-2 border-blue-400 bg-blue-50 px-4 py-3 text-blue-800 animate-in zoom-in duration-500 shadow-sm">
+                              <div className="flex items-start sm:items-center gap-2.5">
+                                <span className="text-xl mt-0.5 sm:mt-0">💎</span>
+                                <div>
+                                  <p className="text-sm font-bold">
+                                    {lang === "ko" ? "훌륭한 식당일 가능성이 있습니다." : "Highly likely to be an excellent restaurant."}
+                                  </p>
+                                  <p className="text-xs mt-0.5 opacity-90">
+                                    {lang === "ko" ? "리뷰 조작 정황도가 있을 수 있으나, 실사용자 평점이 오히려 더 높습니다. 고급 검색을 참고해주세요." : "Despite possible review events, real user scores are even higher. Please check the deep analysis."}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </>
                       )}
-                    </div>
 
                     <div className={`rounded-xl border p-3 text-xs space-y-1.5 mt-4 ${isCritical ? 'bg-slate-800/50 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-100 text-slate-600'}`}>
                       <p>👑 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>4.0+</strong> : {translations[lang].legend4}</p>
@@ -560,6 +589,14 @@ export default function HomePage() {
                       >
                         {translations[lang].advancedButton}
                       </button>
+                    )}
+                    
+                    {!hasAdvanced && (
+                      <div className="w-full rounded-xl border border-dashed border-slate-300 bg-slate-50/80 px-4 py-3 text-sm font-medium text-slate-500 text-center shadow-sm mt-2">
+                        ⏳ {lang === "ko" 
+                          ? "고급 검색 준비 중 (약 30초 후 다시 검색해주세요)" 
+                          : "Preparing deep analysis (Search again in 30s)"}
+                      </div>
                     )}
 
                     {/* 현재 뷰가 고급 뷰일 때, 다시 기본(구글) 뷰로 돌아가는 버튼 표시 */}
