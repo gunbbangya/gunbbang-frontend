@@ -445,8 +445,8 @@ export default function HomePage() {
                         {isAdvancedView ? translations[lang].advancedStatus : translations[lang].statusDone}
                       </span>
 
-                      {/* 💡 1. 가짜 리뷰 정황 경고 (조작 확률 70% 이상일 때만 뜸) */}
-                      {eventProb >= 70 && (
+                      {/* 💡 1. 가짜 리뷰 정황 경고 (오직 '기본 검색' 화면에서만 뜸!) */}
+                      {!isAdvancedView && eventProb >= 70 && (
                         <div className="mb-6 rounded-xl border-2 border-dashed border-red-500/60 bg-red-950/40 p-4 animate-in zoom-in duration-500">
                           <div className="flex items-start sm:items-center gap-3">
                             <span className="text-3xl animate-bounce mt-1 sm:mt-0">🚨</span>
@@ -462,7 +462,7 @@ export default function HomePage() {
                        </div>
                       )}
 
-                      {/* 💡 2. 고급 검색 점수 차이 배너 (워딩 수정: 객관적인 차이만 안내) */}
+                      {/* 💡 2. 고급 검색 점수 차이 안내 (오직 '기본 검색' 화면에 카카오 데이터가 도착했을 때만 뜸!) */}
                       {!isAdvancedView && kakaoData && (
                         <>
                           {scoreDiff >= 1.0 && (
@@ -495,7 +495,7 @@ export default function HomePage() {
                       )}
                     </div>
 
-                    {/* 💡 [점수 복구] 여기서 점수가 다시 화면에 나타납니다! */}
+                    {/* 💡 거대한 숫자 점수 UI */}
                     {typeof realScore === "number" && (
                       <div className="flex flex-col items-center justify-center mt-6 mb-6 animate-in fade-in duration-700">
                         <div className="text-7xl font-black tracking-tighter text-slate-800 flex items-baseline gap-2">
@@ -504,7 +504,7 @@ export default function HomePage() {
                       </div>
                     )}
                   </header>
-                  
+
                   <section className="space-y-6">
                     <div className={`rounded-2xl border px-4 py-4 text-sm ${isCritical ? 'bg-blue-950/30 border-blue-900/50 text-slate-300' : 'bg-blue-50/50 border-blue-100 text-slate-700'}`}>
                       <p className={`mb-2 text-xs font-bold flex items-center gap-1 ${isCritical ? 'text-blue-400' : 'text-blue-600'}`}>
