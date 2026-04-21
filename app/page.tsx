@@ -434,9 +434,9 @@ export default function HomePage() {
 
               <div className="px-4 pt-8 sm:px-6 sm:pt-10">
                 <div className="space-y-8">
-                 <header className="space-y-4">
+                <header className="space-y-4">
                     <div>
-                      {/* 💡 뱃지 텍스트 변경: 기본 뷰 vs 고급 뷰 */}
+                      {/* 💡 뱃지 */}
                       <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium border mb-4 ${
                         isAdvancedView 
                           ? 'bg-amber-100 text-amber-800 border-amber-300' 
@@ -445,7 +445,7 @@ export default function HomePage() {
                         {isAdvancedView ? translations[lang].advancedStatus : translations[lang].statusDone}
                       </span>
 
-                      {/* 💡 1. 구글 패턴 분석 기반 가짜 리뷰 경고 (기존 로직) */}
+                      {/* 💡 1. 가짜 리뷰 정황 경고 (조작 확률 70% 이상일 때만 뜸) */}
                       {eventProb >= 70 && (
                         <div className="mb-6 rounded-xl border-2 border-dashed border-red-500/60 bg-red-950/40 p-4 animate-in zoom-in duration-500">
                           <div className="flex items-start sm:items-center gap-3">
@@ -461,46 +461,32 @@ export default function HomePage() {
                           </div>
                        </div>
                       )}
-                    
-{/* 💡 [새로 추가] 기본 검색 화면에서 보여주는 '고급 검색 점수 차이' 배너 */}
-{!isAdvancedView && kakaoData && (
+
+                      {/* 💡 2. 고급 검색 점수 차이 배너 (워딩 수정: 객관적인 차이만 안내) */}
+                      {!isAdvancedView && kakaoData && (
                         <>
-                          {/* 거품 감지 (구글이 1.0점 이상 높음 -> 빨간색) */}
                           {scoreDiff >= 1.0 && (
                             <div className="mb-6 rounded-xl border-2 border-red-400 bg-red-50 px-4 py-3 text-red-800 animate-in zoom-in duration-500 shadow-sm">
                               <div className="flex items-center gap-2.5">
                                 <span className="text-xl">🚨</span>
-                                <p className="text-sm font-bold">
-                                  {lang === "ko" ? `고급 분석 결과와 ${scoreDiff.toFixed(1)}점 차이납니다.` : `${scoreDiff.toFixed(1)} points diff from advanced analysis.`}
-                                </p>
+                                <p className="text-sm font-bold">고급 분석 결과와 {scoreDiff.toFixed(1)}점 차이가 납니다.</p>
                               </div>
                             </div>
                           )}
-
-                          {/* 거품 의심 (구글이 0.6 ~ 0.9점 높음 -> 노란색) */}
                           {scoreDiff >= 0.6 && scoreDiff < 1.0 && (
                             <div className="mb-6 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 text-amber-800 animate-in zoom-in duration-500 shadow-sm">
                               <div className="flex items-center gap-2.5">
                                 <span className="text-xl">⚠️</span>
-                                <p className="text-sm font-bold">
-                                  {lang === "ko" ? `고급 분석 결과와 ${scoreDiff.toFixed(1)}점 차이납니다.` : `${scoreDiff.toFixed(1)} points diff from advanced analysis.`}
-                                </p>
+                                <p className="text-sm font-bold">고급 분석 결과와 {scoreDiff.toFixed(1)}점 차이가 납니다.</p>
                               </div>
                             </div>
                           )}
-
-                          {/* 숨은 찐맛집 (카카오 점수가 오히려 더 높음 -> 파란색) */}
                           {scoreDiff < 0 && (
                             <div className="mb-6 rounded-xl border-2 border-blue-400 bg-blue-50 px-4 py-3 text-blue-800 animate-in zoom-in duration-500 shadow-sm">
                               <div className="flex items-start sm:items-center gap-2.5">
                                 <span className="text-xl mt-0.5 sm:mt-0">💎</span>
                                 <div>
-                                  <p className="text-sm font-bold">
-                                    {lang === "ko" ? "훌륭한 식당일 가능성이 있습니다." : "Highly likely to be an excellent restaurant."}
-                                  </p>
-                                  <p className="text-xs mt-0.5 opacity-90">
-                                    {lang === "ko" ? "리뷰 조작 정황도가 있을 수 있으나, 실사용자 평점이 오히려 더 높습니다. 고급 검색을 참고해주세요." : "Despite possible review events, real user scores are even higher. Please check the deep analysis."}
-                                  </p>
+                                  <p className="text-sm font-bold">고급 분석 결과, 실사용자 평점이 오히려 더 높습니다.</p>
                                 </div>
                               </div>
                             </div>
@@ -509,13 +495,16 @@ export default function HomePage() {
                       )}
                     </div>
 
-                    <div className={`rounded-xl border p-3 text-xs space-y-1.5 mt-4 ${isCritical ? 'bg-slate-800/50 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-100 text-slate-600'}`}>
-                      <p>👑 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>4.0+</strong> : {translations[lang].legend4}</p>
-                      <p>👍 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>3.0+</strong> : {translations[lang].legend3}</p>
-                      <p>🙂 <strong className={isCritical ? 'text-slate-200' : 'text-slate-800'}>2.5+</strong> : {translations[lang].legend25}</p>
-                    </div>
+                    {/* 💡 [점수 복구] 여기서 점수가 다시 화면에 나타납니다! */}
+                    {typeof realScore === "number" && (
+                      <div className="flex flex-col items-center justify-center mt-6 mb-6 animate-in fade-in duration-700">
+                        <div className="text-7xl font-black tracking-tighter text-slate-800 flex items-baseline gap-2">
+                          {realScore.toFixed(1)}
+                        </div>
+                      </div>
+                    )}
                   </header>
-
+                  
                   <section className="space-y-6">
                     <div className={`rounded-2xl border px-4 py-4 text-sm ${isCritical ? 'bg-blue-950/30 border-blue-900/50 text-slate-300' : 'bg-blue-50/50 border-blue-100 text-slate-700'}`}>
                       <p className={`mb-2 text-xs font-bold flex items-center gap-1 ${isCritical ? 'text-blue-400' : 'text-blue-600'}`}>

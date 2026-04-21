@@ -43,18 +43,25 @@ WINDOW_SECONDS = 86400
 # ==========================================
 def get_fast_prompt(lang, place_info):
     if lang == "en":
-        instruction = "You are a 'First-Line Fake Review Detector' analyzing 5 recent reviews. Base score is 2.5."
-        guidelines = "[Detection Logic]\n1. Pattern Recognition: If multiple reviews share identical hashtags or specific keywords (e.g., 'date spot'), suspect a review event.\n2. Fatal Flaw: Even if positive reviews exist, if 1 review points out a 'fatal flaw' (hygiene, extreme rudeness), significantly lower the score.\n3. Scoring: 2.5 is a solid, no-fail spot. 3.0 is a local gem. 4.0 is a national tier. Set 'eventProbability' high if manipulation patterns are detected."
-        json_format = '{ "translatedName": "Name", "translatedAddress": "Address", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "1-2 sentence summary: Focus on fake patterns and whether there is a fatal experience-breaker.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        instruction = "You are a 'First-Line Fake Review Detector'. Base score is 2.5."
+        guidelines = """
+        [Detection & Scoring Logic]
+        1. Pattern Recognition: If keywords or hashtags repeat unnaturally, increase 'eventProbability'.
+        2. Strict 'Fatal Flaw' (Score Eraser): Only [Poor Hygiene (bugs, hair), Extreme Rudeness (insults, ignoring customers), Spoiled Food] are fatal. Slash the score only for these.
+        3. Reference Info (Include in Summary): Expensive prices, long waiting times, and parking issues are NOT fatal flaws. Do NOT slash scores for these, but ALWAYS mention them in the summary as 'reference info' so users can be prepared.
+        4. NO USERNAMES: Never mention specific nicknames or usernames found in reviews. Use generic terms like 'some visitors'.
+        """
+        json_format = '{ "translatedName": "Name", "translatedAddress": "Address", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Summary including patterns, fatal flaws, and reference info (price/wait/parking). No nicknames.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
     else:
         instruction = "당신은 5개의 리뷰에서 조작 패턴을 찾아내는 '1차 필터링 요원'입니다. 기준점은 2.5점입니다."
         guidelines = """
-        [🔍 1차 방어선 감지 논리]
-        1. 앵무새 패턴 감지: 특정 키워드나 해시태그가 반복되면 '보상형 리뷰'로 간주하고 조작 확률(eventProbability)을 대폭 높이세요.
-        2. 치명적 결함(Fatal Flaw): 다른 칭찬이 많더라도 단 한 명이라도 위생이나 서비스에서 '경험을 완전히 망치는 치명적 문제'를 지적했다면 전체 평점을 크게 낮추세요.
-        3. 점수 체계: 2.5점은 '실패 없는 집(평균)', 3.0점은 '검증된 맛집', 4.0점은 '전국구 맛집'입니다.
+        [🔍 1차 방어선 감지 및 채점 논리]
+        1. 앵무새 패턴 감지: 특정 키워드나 해시태그가 반복되면 조작 확률(eventProbability)을 높이세요.
+        2. 치명적 결함(점수 감점 기준): 오직 [위생 불량(벌레, 이물질), 심각한 불친절(욕설, 반말, 손님 무시), 상한 음식]만 치명적 결함으로 간주하여 점수를 대폭 낮춥니다.
+        3. 필수 참고 정보(요약 포함): 비싼 가격, 긴 웨이팅, 주차 불편은 '치명적 결함'이 아닙니다. 이를 이유로 점수를 대폭 깎지 마세요. 대신, 사용자가 참고할 수 있도록 요약문에 반드시 해당 내용(가격/웨이팅/주차 등)을 포함하여 서술하세요.
+        4. 닉네임 언급 금지: 리뷰어의 닉네임이나 실명을 절대 직접 언급하지 마세요. '방문객들', '실사용자' 등의 표현을 사용하세요.
         """
-        json_format = '{ "translatedName": "가게 이름", "translatedAddress": "가게 주소", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "리뷰 조작 가능성과 치명적 단점 여부를 중심으로 1~2줄 요약하세요.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        json_format = '{ "translatedName": "가게 이름", "translatedAddress": "가게 주소", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "조작 정황, 치명적 단점, 그리고 참고 정보(가격/웨이팅/주차)를 포함하여 1~2줄로 요약하세요. 닉네임 언급은 금지합니다.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
     
     return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nInput Data: Name: {place_info['name']}\nReviews: {' '.join(place_info['reviews'])}"
 
@@ -64,25 +71,26 @@ def get_deep_prompt(lang, place_name, reviews):
         instruction = "You are a 'Chief Culinary Profiler' analyzing 25 raw reviews. Base score is 2.5."
         guidelines = """
         [Deep Analysis Logic]
-        1. Reviewer Profiling: Trust the 'strict critics' (avg score < 3.5). A 5-star from them is a real deal.
-        2. Fatal Flaw Rule: Even if most reviews are positive, if there is a 'fatal flaw' (dirty environment, excessive waiting, staff hostility), lower the score significantly. One clear fatal issue is enough to lower the overall rating.
-        3. Scoring: 2.5 is 'Good/No-Fail'. 3.0 is 'Excellent/Local Gem'. 4.0 is 'Legendary/National Tier'.
-        4. Practical Tip: Extract one concrete tip (e.g., parking, hidden menu, best seats).
+        1. Profiling: Prioritize detailed reviews over simple praise.
+        2. Strict 'Fatal Flaw': Only [Hygiene issues, Extreme Rudeness, Spoiled Food] significantly lower the score. 
+        3. Reference Info: Price, waiting, and parking issues must be mentioned in the summary for user reference, but they are NOT fatal flaws that crush the score.
+        4. NO USERNAMES: Absolutely no mention of reviewer nicknames or IDs.
+        5. Practical Tip: Extract one actionable tip.
         """
-        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Para 1 (🔍 [Analysis]): Deep dive into reviewer credibility and fatal flaws. Para 2 (💡 [Visitor Tip]): One practical, actionable tip.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Para 1 (🔍 [Analysis]): Deep dive into flaws and reference info (price/wait/parking) without using nicknames. Para 2 (💡 [Visitor Tip]): One practical tip.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
     else:
         instruction = "당신은 25개의 카카오 리뷰를 해부하는 '전문 미식 프로파일러'입니다. 기준점은 2.5점입니다."
         guidelines = """
         [💡 전문 분석가 감지 논리]
-        1. 리뷰어 성향 파악: 평균 별점이 낮은 '엄격한 리뷰어'의 평가에 높은 가중치를 두세요. 단순히 좋다는 말보다 구체적인 맛의 묘사를 신뢰하세요.
-        2. 치명적 단점 반영(Fatal Flaw): 아무리 평점 평균이 높아도, 위생 상태나 직원의 태도 등에서 치명적인 문제가 발견되면 점수를 대폭 삭감하세요. 단 한 건이라도 사실로 확인되는 치명적 단점은 대폭 감점의 근거가 됩니다.
-        3. 점수 체계: 2.5점은 '실패 없는 괜찮은 집', 3.0점은 '정말 훌륭한 찐맛집', 4.0점은 '전국에서 찾아갈 만한 인생 맛집'입니다.
-        4. 실전 꿀팁: 사용자가 방문 전 반드시 알아야 할 팁(주차, 대기 시간, 추천 메뉴 등)을 추출하세요.
+        1. 리뷰어 분석: 깐깐한 리뷰어의 구체적인 평가를 중심으로 신뢰도를 파악하세요.
+        2. 치명적 결함(감점 기준): [위생 불량, 심각한 불친절, 상한 음식]이 발견될 때만 점수를 대폭 삭감합니다.
+        3. 필수 참고 정보(요약 반영): 가격이 비싸거나 웨이팅이 길거나 주차가 힘든 점은 '치명적 단점'이 아니므로 점수를 파괴하는 근거로 쓰지 마세요. 하지만 방문객이 꼭 알아야 할 정보이므로 요약문(심층 분석 문단)에 반드시 '참고할 내용'으로 언급하세요.
+        4. 닉네임 언급 절대 금지: 리뷰어의 닉네임(예: '골드', '은별' 등)을 절대 요약에 넣지 마세요. '일부 리뷰어', '방문자' 등으로 지칭하세요.
+        5. 실전 꿀팁: 주차, 예약, 추천 메뉴 등 실질적인 팁 한 줄.
         """
-        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "두 문단 작성. 첫 문단은 \'🔍 [심층 분석]\'으로 시작하여 리뷰어의 신뢰도와 치명적 단점 유무를 파악해 결론 도출. 두 번째 문단은 줄바꿈 후 \'💡 [실전 꿀팁]\'으로 시작하여 유용한 정보 한 줄 제공.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "두 문단 작성. 첫 문단은 \'🔍 [심층 분석]\'으로 시작하여 결함 및 참고 정보(가격/웨이팅/주차)를 닉네임 없이 서술. 두 번째 문단은 줄바꿈 후 \'💡 [실전 꿀팁]\'으로 시작.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
     
     return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nTarget: {place_name}\nReviews: {reviews_text}"
-
 
 app = FastAPI()
 
