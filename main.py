@@ -145,29 +145,236 @@ def search_places(q: str, request: Request):
 # 💡 [방어] 한 번에 최대 2개의 크롤러만 동작
 crawler_semaphore = threading.Semaphore(2)
 
-def run_kakao_advanced_analysis(query: str, search_keyword: str, address: str, lang: str):
-    print(f"🚦 [크롤러 대기열] '{search_keyword}' 순서 대기 중...")
-    
+# 구글 상호: 괄호·| 뒤 **부가 설명** / 영·중·일 꼬리 (상호 **본문 한글**은 잘랄 때 주의)
+_TRAILING_PAREN = re.compile(
+    r"[\(（\[\{【［\uFF08][^\)\]）\]\}】］\uFF09]{0,80}[\)\]）\]\}】］\uFF09]\s*"
+)
+_TRAILING_LATIN = re.compile(
+    r"[\s\-_/]*[A-Za-z][A-Za-z0-9'&\.\-]{0,50}(?:\s+[A-Za-z0-9'&\.\-]{0,30})*[/／]?"
+)
+_TRAILING_CJK_FOREIGN = re.compile(
+    r"[\s\-_/·]*[一-龥ぁ-んァ-ヶ㐀-㿯々〆〇]{1,40}$"
+)
+
+
+def clean_place_name(name: str) -> str:
+    """
+    **검색·프롬프트용 핵심 키워드** 추출. 상호 **단어(토큰)를 함부로 삭제하지 않는다.**
+    '존맛식당' → '존맛'이 포함된 형태로 유지 (| 뒤 꼬리·영어 설명만 제거).
+    """
+    if not name or not str(name).strip():
+        return ""
+    s = str(name).strip()
+    s = s.replace("｜", "|")
+    if "|" in s:
+        s = s.split("|", 1)[0].strip()
+
+    for _ in range(4):
+        t = _TRAILING_PAREN.sub(" ", s)
+        if t == s:
+            break
+        s = t
+
+    s = re.sub(r"\s+", " ", s).strip()
+
+    for _ in range(3):
+        before = s
+        s2 = re.sub(
+            r"([가-힣0-9]+)\s+([A-Za-z][A-Za-z0-9'&\.\-\s,]{0,50})$",
+            r"\1",
+            s,
+        )
+        s2 = _TRAILING_LATIN.sub("", s2).strip()
+        s2 = re.sub(r"[\-–—_/\s]+$", "", s2)
+        s2 = re.sub(r"\s+", " ", s2).strip()
+        s = s2
+        if s == before:
+            break
+
+    s3 = re.sub(
+        r"([가-힣0-9]+)\s*([一-龥㐀-㿯ぁ-んァ-ヶ・]{1,20})$",
+        r"\1",
+        s,
+    )
+    s = _TRAILING_CJK_FOREIGN.sub("", s3).strip() if s3 else ""
+    s = s.strip("·•.,，、 ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def korean_hangul_keywords_only(s: str) -> str:
+    """영어·특수문자 제거 후 순수 한글(·숫자 제외) 토큰만 — 3차 검색용."""
+    s = re.sub(r"[^가-힣]+", " ", s or "")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def take_head_name_words_2_3(name_core: str) -> str:
+    """2~3단어(공백 기준). '존맛식당'은 한 토큰이면 그대로 1어절로 사용."""
+    toks = [t for t in re.split(r"\s+", (name_core or "").strip()) if t]
+    if not toks:
+        return ""
+    if len(toks) == 1:
+        return toks[0]
+    n = 3 if len(toks) >= 3 else 2
+    return " ".join(toks[:n])
+
+
+def extract_dong_gu_from_address(address: str) -> tuple[str, str]:
+    """
+    Google/Kakao 주소 문자열에서 '○○구'·'○○동' 추출. 없으면 ("", "").
+    """
+    if not address or not str(address).strip():
+        return ("", "")
+
+    s = re.sub(r"\s+", " ", str(address).strip())
+    s = re.sub(
+        r"(?i)대한민국|republic of korea|south korea|korea,?\s*rep\.?|kr\b|korea|서울특별시|부산광역시|대구광역시|인천광역시|광주광역시|대전광역시|울산광역시|세종특별자치시|제주특별자치도|경기도|강원특별자치도|충청북도|충청남도|전북특별자치도|전라북도|전라남도|경상북도|경상남도",
+        " ",
+        s,
+    )
+    s = re.sub(r"\s+", " ", s).strip()
+
+    gu = ""
+    dong = ""
+    m = re.search(r"([가-힣]{1,5}구)\s+([가-힣0-9·]{0,4})([가-힣]{1,5}동)\b", s)
+    if m:
+        gu, dong = m.group(1), m.group(3)
+    if not dong:
+        dlist = re.findall(r"[가-힣0-9]{0,2}[가-힣]{1,4}동(?![가-힣])", s)
+        if dlist:
+            dong = dlist[-1]
+    if not gu and dong:
+        pre = s[: s.find(dong)]
+        m_gu = re.findall(r"([가-힣]{1,5}구)", pre)
+        if m_gu:
+            gu = m_gu[-1]
+
+    return (gu, dong)
+
+
+def extract_sido_gu_dong_for_log(address: str) -> dict[str, str]:
+    s = re.sub(r"\s+", " ", (address or "").strip())
+    gugun, dong = extract_dong_gu_from_address(address)
+    sido = ""
+    m = re.search(
+        r"(서울특별시|부산광역시|대구광역시|인천광역시|광주광역시|대전광역시|울산광역시|"
+        r"세종특별자치시|제주특별자치도|경기도|강원특별자치도|"
+        r"충청북도|충청남도|전북특별자치도|전라북도|전라남도|경상북도|경상남도|"
+        r"[가-힣]+광역시)",
+        s,
+    )
+    if m:
+        sido = m.group(1)
+    return {"sido": sido, "gugun": gugun, "dong": dong}
+
+
+def _normalize_kakao_q(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _iter_kakao_flexible_plans(
+    name_raw: str, address: str
+) -> list[tuple[str, str, str]]:
+    """
+    (라벨, API전체쿼리, 로그용: 동+키워드) 1~3차. 동일 쿼리는 생략.
+    1차: 구글 상호 **전문** (정확 일치·긴 광고명 대비)
+    2차: **동** + `clean` 상호 **앞 2~3어절** (성공률에 유리)
+    3차: **동** + **순수 한글** (영·기호 제거)
+    """
+    nr = (name_raw or "").strip()
+    if not nr:
+        return []
+    _gu, dong = extract_dong_gu_from_address(address)
+    core = clean_place_name(nr) or nr
+    head2 = take_head_name_words_2_3(core)
+    hang = korean_hangul_keywords_only(nr) or korean_hangul_keywords_only(core)
+
+    # 1차: 전문
+    q1 = nr
+    log1 = f"전문: {nr[:50]}{'…' if len(nr) > 50 else ''}"
+
+    # 2차: 동 + 앞 2~3어절(핵심 키워드, 존맛·맛집 토큰 보존)
+    q2 = f"{dong} {head2}".strip() if (dong and head2) else (head2 or core)
+    log2 = f"{dong or '(동없음)'} + {head2}" if head2 else "(어절없음)"
+
+    # 3차: 동 + 순수 한글
+    q3 = f"{dong} {hang}".strip() if (dong and hang) else (hang or "")
+    if not q3 and dong:
+        q3 = dong.strip()
+    log3 = f"{dong or '(동없음)'} + {hang}" if hang else f"{dong or ''}"
+
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for label, q, log_kw in (("1차", q1, log1), ("2차", q2, log2), ("3차", q3, log3)):
+        nq = _normalize_kakao_q(q)
+        if not nq or nq in seen:
+            continue
+        seen.add(nq)
+        out.append((label, nq, log_kw))
+    return out
+
+
+def run_kakao_advanced_analysis(query: str, place_name_raw: str, address: str, lang: str):
+    name_clean = clean_place_name(place_name_raw)
+    reg = extract_sido_gu_dong_for_log(address)
+    print(
+        f"🧹 [카카오] 상호(원문)='{place_name_raw}' | 핵심키워드(clean)='{name_clean}'\n"
+        f"   🗺️ [시/구/동] 시={reg['sido'] or '—'} | 구={reg['gugun'] or '—'} | 동={reg['dong'] or '—'} | "
+        f"address(80자)='{(address or '')[:80]}'"
+    )
+    search_plans = _iter_kakao_flexible_plans(place_name_raw, address)
+    if not search_plans:
+        print("🚨 [크롤러 중단] 검색 키워드가 비어 있음")
+        if collection is not None:
+            collection.update_one(
+                {"name": query},
+                {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}},
+            )
+        return
+
+    print(
+        f"🚦 [크롤러 대기열] {len(search_plans)}단계(주소교차검증·후보도) | "
+        + " | ".join(f"{l}→「{k[:40]}{'…' if len(k) > 40 else ''}」" for l, k, _ in search_plans)
+    )
+
     with crawler_semaphore:
         time.sleep(random.uniform(1, 3))
-        print(f"🏃‍♂️ [크롤러 출동] '{search_keyword}' 분석 시작!")
-        
+
+        kakao_query = ""
+        place_id = None
         try:
-            place_id = get_kakao_place_id(search_keyword, address)
-            if not place_id: 
-                print(f"🚨 [크롤러 중단] 카카오맵에서 '{search_keyword}' 못 찾음")
+            for label, kq, kw_log in search_plans:
+                print(
+                    f"카카오 검색 시도: {label} [동+추출키워드: {kw_log}] | 전체쿼리: {kq}"
+                )
+                place_id = get_kakao_place_id(kq, address)
+                if place_id:
+                    kakao_query = kq
+                    print(
+                        f"✅ {label} 검색·주소교차로 place_id 확보 (이후 리뷰·분석에 사용)"
+                    )
+                    break
+                print(f"   … {label} API 결과 없음·다음 전략")
+
+            if not place_id:
+                print(
+                    f"🚨 [크롤러 중단] 1~3차 모두 실패. clean='{name_clean}' / 주소='{(address or '')[:100]}…'"
+                )
                 if collection is not None:
                     collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
                 return
 
+            print(f"🏃‍♂️ [크롤러] 리뷰 수집: 성공 키워드='{kakao_query}'")
             reviews = get_deep_kakao_reviews(place_id)
             if len(reviews) < 5: 
-                print(f"🚨 [크롤러 중단] '{search_keyword}' 카카오 리뷰 부족 ({len(reviews)}개)")
+                print(
+                    f"🚨 [크롤러 중단] 키워드='{kakao_query}' 카카오 리뷰 부족 ({len(reviews)}개)"
+                )
                 if collection is not None:
                     collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
                 return
 
-            prompt = get_deep_prompt(lang, search_keyword, reviews)
+            prompt = get_deep_prompt(lang, name_clean or kakao_query, reviews)
             response = client.chat.completions.create(
                 model="gpt-4o-mini", response_format={ "type": "json_object" },
                 messages=[{"role": "system", "content": "You are a JSON generating assistant."}, {"role": "user", "content": prompt}]
@@ -182,7 +389,7 @@ def run_kakao_advanced_analysis(query: str, search_keyword: str, address: str, l
                 set_payload = {f"kakao_result_{lang}": ai_data}
                 if kakao_score >= 3.5:
                     set_payload["map_flag"] = {
-                        "name": search_keyword,
+                        "name": name_clean or kakao_query,
                         "address": address,
                         "realScore": kakao_score,
                         "isTrophy": kakao_score >= 4.0,
@@ -192,19 +399,24 @@ def run_kakao_advanced_analysis(query: str, search_keyword: str, address: str, l
                         "date": datetime.now().strftime("%Y-%m-%d"),
                     }
                 collection.update_one({"name": query}, {"$set": set_payload})
-                print(f"🔥 [크롤러 완료] '{search_keyword}' 고급 분석 DB 저장 완료!")
+                print(
+                    f"🔥 [크롤러 완료] API검색='{kakao_query}' (정제='{name_clean}') 고급 분석 DB 저장 완료!"
+                )
                 if kakao_score >= 3.5:
                     trophy = "황금 트로피" if kakao_score >= 4.0 else "검증 깃발"
-                    print(f"🚩 [깃발] 카카오 점수 {kakao_score:.1f} → 지도용 map_flag 저장 ({trophy})")
+                    print(
+                        f"🚩 [깃발] API검색='{kakao_query}' 카카오 점수 {kakao_score:.1f} → map_flag ({trophy})"
+                    )
                 
         except Exception as e:
+            print(
+                f"🚨 [크롤러 예외] query={query!r} API검색='{kakao_query}' (정제='{name_clean}'): {e}"
+            )
             if collection is not None:
-                collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
-
-def clean_place_name(name):
-    # | ( [ - – 같은 구분 기호가 나오면 그 앞부분만 취함
-    cleaned = re.split(r'[|(\[–-]', name)[0].strip()
-    return cleaned
+                collection.update_one(
+                    {"name": query},
+                    {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}},
+                )
 
 @app.post("/api/analyze")
 async def analyze_place(request: Request, background_tasks: BackgroundTasks):
@@ -242,8 +454,9 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
                         result_data["has_advanced"] = False
                         collection.update_one({"name": query}, {"$set": {kakao_cache_key: {"status": "processing"}}}, upsert=True)
                         
-                        kakao_keyword = clean_place_name(result_data["name"])
-                        background_tasks.add_task(run_kakao_advanced_analysis, query, kakao_keyword, address, lang)
+                        background_tasks.add_task(
+                            run_kakao_advanced_analysis, query, result_data["name"], address, lang
+                        )
                         
                     return result_data
 
@@ -273,8 +486,9 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
             }
             collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
         
-        kakao_keyword = clean_place_name(place_info['name'])
-        background_tasks.add_task(run_kakao_advanced_analysis, query, kakao_keyword, address, lang)
+        background_tasks.add_task(
+            run_kakao_advanced_analysis, query, place_info["name"], address, lang
+        )
         
         return final_result
 
