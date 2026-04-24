@@ -53,6 +53,8 @@ const translations: Record<
     /** 고급 화면 축하 배너 (카카오 realScore ≥ 3.5) */
     kakaoTrophyBanner: string;
     kakaoFlagBanner: string;
+    kakaoTrophyNotification: string;
+    kakaoFlagNotification: string;
   }
 > = {
   ko: {
@@ -102,6 +104,10 @@ const translations: Record<
     advancedStatus: "🔥 심층 분석 완료",
     kakaoTrophyBanner: "황금 트로피 획득! 전국구 인생 맛집 등극!",
     kakaoFlagBanner: "검증된 맛집 깃발 획득! 실패 없는 맛집 등극!",
+    kakaoTrophyNotification:
+      "🏆 고급 분석 완료: 4.0점 이상 황금 트로피 식당으로 확인되었습니다!",
+    kakaoFlagNotification:
+      "🚩 고급 분석 완료: 3.5점 이상 검증된 맛집으로 확인되었습니다!",
   },
   en: {
     loadingMessages: [
@@ -150,8 +156,15 @@ const translations: Record<
     advancedStatus: "🔥 Deep Analysis Complete",
     kakaoTrophyBanner: "Gold trophy earned! A national-tier, life-changing spot!",
     kakaoFlagBanner: "Verified map flag earned! A reliable, no-fail pick!",
+    kakaoTrophyNotification:
+      "🏆 Advanced analysis complete: scored 4.0+ — a gold-trophy level spot!",
+    kakaoFlagNotification:
+      "🚩 Advanced analysis complete: scored 3.5+ — a verified pick!",
   },
 };
+
+/** 고급 분석(카카오) 트로피/깃발 알림을 React Strict Mode 이중 effect에서도 1회만 (같은 식당+세션) */
+let kakaoTrophyFlagAlertKey: string | null = null;
 
 export default function HomePage() {
   const [lang, setLang] = useState<Lang>("ko");
@@ -188,6 +201,7 @@ export default function HomePage() {
   const [redFlags, setRedFlags] = useState(0);
   const [goldFlags, setGoldFlags] = useState(0);
   const [userDailyCount, setUserDailyCount] = useState(0);
+  const [kakaoPollEnabled, setKakaoPollEnabled] = useState(false);
 
   const isCritical = showResult && realScore !== null && realScore <= 2.4;
 
@@ -238,6 +252,98 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, [isAnalyzing, lang]);
 
+  // 카카오 심층 분석이 백그라운드에서 끝날 때까지 주기적으로 캐시를 확인 (일일 한도 API 호출에만 집계)
+  useEffect(() => {
+    if (!kakaoPollEnabled || hasAdvanced || !showResult || !selectedPlace) return;
+
+    const API = "https://gunbbang-backend.onrender.com/api/analyze";
+    const { name, address } = selectedPlace;
+    const maxAttempts = 36;
+    let attempts = 0;
+    let cancelled = false;
+
+    const tryFetchKakao = async () => {
+      if (cancelled) return;
+      attempts += 1;
+      if (attempts > maxAttempts) {
+        setKakaoPollEnabled(false);
+        return;
+      }
+      try {
+        const response = await fetch(API, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: name, address, lang }),
+        });
+        if (response.status === 429 || !response.ok) return;
+        const data = await response.json();
+        if (data.has_advanced && data.kakao_data) {
+          setKakaoData(data.kakao_data);
+          setHasAdvanced(true);
+          setKakaoPollEnabled(false);
+        }
+      } catch {
+        /* keep polling */
+      }
+    };
+
+    const t0 = setTimeout(() => {
+      void tryFetchKakao();
+    }, 3000);
+    const id = setInterval(() => {
+      void tryFetchKakao();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(t0);
+      clearInterval(id);
+    };
+  }, [kakaoPollEnabled, hasAdvanced, showResult, selectedPlace, lang]);
+
+  // 트로피/깃발 알림·confetti·로컬 카운트: 카카오(고급) 점수 기준, 식당당 1회
+  useEffect(() => {
+    if (!hasAdvanced || !kakaoData || !selectedPlace) return;
+    const ks = Number(kakaoData.realScore);
+    if (Number.isNaN(ks) || ks < 3.5) return;
+
+    const key = `kakao::${selectedPlace.name}::${selectedPlace.address}`;
+    if (kakaoTrophyFlagAlertKey === key) return;
+    kakaoTrophyFlagAlertKey = key;
+
+    if (ks >= 4.0) {
+      confetti({
+        particleCount: 200,
+        spread: 120,
+        origin: { y: 0.6 },
+        colors: ["#FFD700", "#FFA500", "#FF8C00"],
+      });
+      setGoldFlags((prev) => {
+        const next = prev + 1;
+        try {
+          localStorage.setItem("jjin-view:goldFlags", next.toString());
+        } catch { }
+        return next;
+      });
+      alert(translations[lang].kakaoTrophyNotification);
+    } else {
+      confetti({
+        particleCount: 100,
+        spread: 80,
+        origin: { y: 0.6 },
+        colors: ["#FF0000", "#FFFFFF", "#FFB6C1"],
+      });
+      setRedFlags((prev) => {
+        const next = prev + 1;
+        try {
+          localStorage.setItem("jjin-view:redFlags", next.toString());
+        } catch { }
+        return next;
+      });
+      alert(translations[lang].kakaoFlagNotification);
+    }
+  }, [hasAdvanced, kakaoData, selectedPlace, lang]);
+
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!searchQuery.trim()) return;
@@ -251,6 +357,8 @@ export default function HomePage() {
     setKakaoData(null);
     setBasicData(null);
     setIsAdvancedView(false);
+    setKakaoPollEnabled(false);
+    kakaoTrophyFlagAlertKey = null;
 
     const fetchSearchResults = async () => {
       try {
@@ -280,6 +388,8 @@ export default function HomePage() {
 
     setSelectedPlace(place);
     setIsAnalyzing(true);
+    kakaoTrophyFlagAlertKey = null;
+    setKakaoPollEnabled(false);
 
     const fetchAnalysis = async () => {
       try {
@@ -292,6 +402,7 @@ export default function HomePage() {
 
         if (response.status === 429) {
           alert(translations[lang].overloadError);
+          setKakaoPollEnabled(false);
           setIsAnalyzing(false);
           setShowResult(false);
           return;
@@ -319,33 +430,15 @@ export default function HomePage() {
         setChartDetails(details);
         setBasicData({ score, eProb, summary, details });
 
-        // 💡 2. 고급 데이터가 있으면 세팅해두기 (버튼 띄울 준비)
+        // 💡 2. 고급(카카오) 데이터: 첫 응답에 있으면 바로, 없으면 백그라운드 완료까지 폴링
         if (data.has_advanced && data.kakao_data) {
           setHasAdvanced(true);
           setKakaoData(data.kakao_data);
+          setKakaoPollEnabled(false);
         } else {
           setHasAdvanced(false);
           setKakaoData(null);
-        }
-
-        if (data.isNewDiscovery) {
-          if (score >= 4.0) {
-            confetti({ particleCount: 200, spread: 120, origin: { y: 0.6 }, colors: ['#FFD700', '#FFA500', '#FF8C00'] });
-            setGoldFlags((prev) => {
-              const next = prev + 1;
-              localStorage.setItem("jjin-view:goldFlags", next.toString());
-              return next;
-            });
-            alert(`🎉 [최초 발견] 대박! 4.0점 이상 황금 깃발 맛집을 발견하셨습니다!`);
-          } else if (score >= 3.5) {
-            confetti({ particleCount: 100, spread: 80, origin: { y: 0.6 }, colors: ['#FF0000', '#FFFFFF', '#FFB6C1'] });
-            setRedFlags((prev) => {
-              const next = prev + 1;
-              localStorage.setItem("jjin-view:redFlags", next.toString());
-              return next;
-            });
-            alert(`🚩 [최초 발견] 3.5점 이상! 빨간 깃발을 지도에 꽂았습니다!`);
-          }
+          setKakaoPollEnabled(true);
         }
 
         setIsAnalyzing(false);
@@ -353,6 +446,7 @@ export default function HomePage() {
       } catch (error) {
         console.error(error);
         alert(translations[lang].analyzeError);
+        setKakaoPollEnabled(false);
         setIsAnalyzing(false);
         setShowResult(false);
       }
@@ -526,7 +620,7 @@ export default function HomePage() {
                       </p>
                     </div>
 
-                    {chartDetails && (
+                    {isAdvancedView && chartDetails && (
                       <div>
                         <h3 className={`text-sm font-bold mb-3 ${isCritical ? 'text-slate-200' : 'text-slate-800'}`}>
                           {translations[lang].detailsTitle}
