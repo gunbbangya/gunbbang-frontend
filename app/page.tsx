@@ -50,6 +50,9 @@ const translations: Record<
     advancedButton: string;
     returnBasic: string;
     advancedStatus: string;
+    /** 고급 화면 축하 배너 (카카오 realScore ≥ 3.5) */
+    kakaoTrophyBanner: string;
+    kakaoFlagBanner: string;
   }
 > = {
   ko: {
@@ -97,6 +100,8 @@ const translations: Record<
     advancedButton: "🔥 고급 심층 분석 보기",
     returnBasic: "↩️ 구글 기본 요약으로 돌아가기",
     advancedStatus: "🔥 심층 분석 완료",
+    kakaoTrophyBanner: "황금 트로피 획득! 전국구 인생 맛집 등극!",
+    kakaoFlagBanner: "검증된 맛집 깃발 획득! 실패 없는 맛집 등극!",
   },
   en: {
     loadingMessages: [
@@ -143,6 +148,8 @@ const translations: Record<
     advancedButton: "🔥 View Advanced Deep Analysis",
     returnBasic: "↩️ Return to Basic Google Summary",
     advancedStatus: "🔥 Deep Analysis Complete",
+    kakaoTrophyBanner: "Gold trophy earned! A national-tier, life-changing spot!",
+    kakaoFlagBanner: "Verified map flag earned! A reliable, no-fail pick!",
   },
 };
 
@@ -321,25 +328,6 @@ export default function HomePage() {
           setKakaoData(null);
         }
 
-        if (score >= 3.5) {
-          try {
-            const flagRes = await fetch("https://gunbbang-backend.onrender.com/api/map-flags", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                name: place.name,
-                address: place.address,
-                score: score,
-                aiSummary: data.aiSummary,
-                details: data.details,
-              }),
-            });
-            if (!flagRes.ok) throw new Error("DB 저장 실패");
-          } catch (err) {
-            console.error("❌ 깃발 저장 실패:", err);
-          }
-        }
-
         if (data.isNewDiscovery) {
           if (score >= 4.0) {
             confetti({ particleCount: 200, spread: 120, origin: { y: 0.6 }, colors: ['#FFD700', '#FFA500', '#FF8C00'] });
@@ -494,6 +482,27 @@ export default function HomePage() {
                         </>
                       )}
                     </div>
+
+                    {isAdvancedView &&
+                      kakaoData &&
+                      (Number(kakaoData.realScore) >= 3.5) && (
+                        <div
+                          className={`mb-4 flex w-full items-center justify-center gap-2.5 rounded-2xl border px-4 py-3.5 text-center text-sm font-bold leading-snug shadow-md animate-in slide-in-from-top duration-700 ${
+                            Number(kakaoData.realScore) >= 4.0
+                              ? "border-amber-300/80 bg-gradient-to-r from-amber-200 via-yellow-300 to-amber-300 text-amber-950"
+                              : "border-slate-300/80 bg-gradient-to-r from-slate-400 to-slate-500 text-white"
+                          }`}
+                        >
+                          <span className="text-2xl shrink-0" aria-hidden>
+                            {Number(kakaoData.realScore) >= 4.0 ? "🏆" : "🚩"}
+                          </span>
+                          <span>
+                            {Number(kakaoData.realScore) >= 4.0
+                              ? translations[lang].kakaoTrophyBanner
+                              : translations[lang].kakaoFlagBanner}
+                          </span>
+                        </div>
+                      )}
 
                     {/* 💡 거대한 숫자 점수 UI */}
                     {typeof realScore === "number" && (

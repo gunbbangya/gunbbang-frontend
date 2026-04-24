@@ -173,10 +173,29 @@ def run_kakao_advanced_analysis(query: str, search_keyword: str, address: str, l
                 messages=[{"role": "system", "content": "You are a JSON generating assistant."}, {"role": "user", "content": prompt}]
             )
             ai_data = json.loads(response.choices[0].message.content)
-            
+            try:
+                kakao_score = float(ai_data.get("realScore", 0) or 0)
+            except (TypeError, ValueError):
+                kakao_score = 0.0
+
             if collection is not None:
-                collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": ai_data}})
+                set_payload = {f"kakao_result_{lang}": ai_data}
+                if kakao_score >= 3.5:
+                    set_payload["map_flag"] = {
+                        "name": search_keyword,
+                        "address": address,
+                        "realScore": kakao_score,
+                        "isTrophy": kakao_score >= 4.0,
+                        "source": "kakao",
+                        "aiSummary": ai_data.get("aiSummary", ""),
+                        "details": ai_data.get("details"),
+                        "date": datetime.now().strftime("%Y-%m-%d"),
+                    }
+                collection.update_one({"name": query}, {"$set": set_payload})
                 print(f"🔥 [크롤러 완료] '{search_keyword}' 고급 분석 DB 저장 완료!")
+                if kakao_score >= 3.5:
+                    trophy = "황금 트로피" if kakao_score >= 4.0 else "검증 깃발"
+                    print(f"🚩 [깃발] 카카오 점수 {kakao_score:.1f} → 지도용 map_flag 저장 ({trophy})")
                 
         except Exception as e:
             if collection is not None:
@@ -263,62 +282,50 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail="분석 실패")
 
 @app.post("/api/map-flags")
-async def save_map_flag(request: Request):
-    if collection is None:
-        raise HTTPException(status_code=500, detail="DB 연결 실패")
-    
-    try:
-        data = await request.json()
-        name = data.get("name")
-        address = data.get("address")
-        score = data.get("score")
-        aiSummary = data.get("aiSummary") 
-        details = data.get("details")    
-
-        if not name or score is None:
-            raise HTTPException(status_code=400, detail="데이터 부족")
-
-        update_data = {
-            "name": name,
-            "address": address,
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "result_ko": {
-                "name": name,
-                "address": address,
-                "realScore": score,
-                "aiSummary": aiSummary,  
-                "details": details       
-            }
-        }
-        
-        collection.update_one({"name": name}, {"$set": update_data}, upsert=True)
-        print(f"💾 [DB 깃발 저장 완료] {name} ({score}점, 요약/상세 포함)")
-        return {"status": "success"}
-    except Exception as e:
-        print("🚨 깃발 저장 에러:", e)
-        raise HTTPException(status_code=500, detail=str(e))
+def save_map_flag_disabled():
+    """구 프론트(구글 점수 기반)용 엔드포인트. 깃발은 카카오 심층 분석 완료 시 서버가 저장합니다."""
+    raise HTTPException(
+        status_code=410,
+        detail="Map flags are now persisted from Kakao deep analysis; client POST is no longer supported.",
+    )
 
 @app.get("/api/map-flags")
 def get_map_flags():
     if collection is None:
         return []
-        
+
     flags = []
     try:
-        docs = collection.find({"result_ko": {"$exists": True}})
-        
+        docs = collection.find(
+            {
+                "map_flag": {"$exists": True, "$ne": None},
+                "map_flag.realScore": {"$gte": 3.5},
+            }
+        )
+
         for doc in docs:
-            data = doc["result_ko"]
-            score = data.get("realScore", 0)
-            
-            if score >= 3.5:
-                flags.append({
-                    "name": data.get("name", doc.get("name")),
-                    "address": data.get("address", doc.get("address")),
+            mf = doc.get("map_flag") or {}
+            name = mf.get("name") or doc.get("name", "")
+            address = mf.get("address") or doc.get("address", "")
+            score = mf.get("realScore", 0)
+            try:
+                score = float(score)
+            except (TypeError, ValueError):
+                score = 0.0
+            if score < 3.5:
+                continue
+            is_trophy = bool(mf.get("isTrophy", score >= 4.0))
+            flags.append(
+                {
+                    "name": name,
+                    "address": address,
                     "score": score,
-                    "aiSummary": data.get("aiSummary", ""), 
-                    "details": data.get("details", None)    
-                })
+                    "isTrophy": is_trophy,
+                    "source": mf.get("source", "kakao"),
+                    "aiSummary": mf.get("aiSummary", ""),
+                    "details": mf.get("details"),
+                }
+            )
         return flags
     except Exception as e:
         print("🚨 깃발 불러오기 에러:", e)

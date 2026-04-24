@@ -14,7 +14,9 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
   const [keyword, setKeyword] = useState(""); 
   
   // 💡 지도에 띄울 깃발 데이터를 담을 상태 (이름, 주소, 점수, 위도, 경도)
-  const [markers, setMarkers] = useState<{name: string; address: string; score: number; lat: number; lng: number}[]>([]);
+  const [markers, setMarkers] = useState<
+    { name: string; address: string; score: number; lat: number; lng: number; isTrophy: boolean }[]
+  >([]);
 
   const defaultCenter = { lat: 37.4979, lng: 127.0276 };
 
@@ -75,6 +77,8 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
       placesArray.forEach((place: any) => {
         // 💡 "대한민국", "KR", "번지" 같은 불필요한 글자를 지워야 카카오가 인식합니다.
         const cleanAddress = place.address.replace("대한민국", "").replace("KR", "").replace("번지", "").trim();
+        const score = typeof place.score === "number" ? place.score : parseFloat(place.score) || 0;
+        const isTrophy = typeof place.isTrophy === "boolean" ? place.isTrophy : score >= 4.0;
 
         geocoder.addressSearch(cleanAddress, (result: any, status: any) => {
           if (status === kakao.maps.services.Status.OK) {
@@ -83,7 +87,8 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
               {
                 name: place.name,
                 address: place.address,
-                score: place.score,
+                score,
+                isTrophy,
                 lat: parseFloat(result[0].y),
                 lng: parseFloat(result[0].x),
               },
@@ -134,14 +139,14 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
                 <div className="flex flex-col items-center hover:scale-110 transition-transform cursor-pointer group">
                   {/* 말풍선 몸통 */}
                   <div className={`px-2.5 py-1.5 text-[11px] font-black text-white rounded-xl shadow-lg flex items-center gap-1 border border-white/20 
-                    ${marker.score >= 4.0 ? 'bg-gradient-to-r from-red-500 to-orange-500' : 'bg-slate-900'}
+                    ${marker.isTrophy ? 'bg-gradient-to-r from-amber-400 to-yellow-500' : 'bg-slate-700'}
                   `}>
-                    <span>{marker.score >= 4.0 ? '🏆' : '🚩'}</span>
+                    <span>{marker.isTrophy ? '🏆' : '🚩'}</span>
                     <span>{marker.score.toFixed(1)}</span>
                   </div>
                   {/* 말풍선 꼬리 */}
                   <div className={`w-2.5 h-2.5 rotate-45 -mt-1 shadow-sm 
-                    ${marker.score >= 4.0 ? 'bg-orange-500' : 'bg-slate-900'}
+                    ${marker.isTrophy ? 'bg-amber-500' : 'bg-slate-700'}
                   `}></div>
                   
                   {/* 마우스를 올리면 가게 이름이 스르륵 나타남! */}
