@@ -43,32 +43,68 @@ WINDOW_SECONDS = 86400
 # ==========================================
 def get_fast_prompt(lang, place_info):
     if lang == "en":
-        instruction = "You are a 'First-Line Fake Review Detector'. Base score is 2.5."
+        instruction = (
+            "You are a 'First-Line Fake Review Detector'. Base score is 2.5. "
+            "details.taste and details.value MUST be JSON float numbers from 1.0 to 5.0, never 0, never strings."
+        )
         guidelines = """
         [Detection & Scoring Logic]
         1. Pattern Recognition: If keywords or hashtags repeat unnaturally, increase 'eventProbability'.
         2. Strict 'Fatal Flaw' (Score Eraser): Only [Poor Hygiene (bugs, hair), Extreme Rudeness (insults, ignoring customers), Spoiled Food] are fatal. Slash the score only for these.
         3. Reference Info (Include in Summary): Expensive prices, long waiting times, and parking issues are NOT fatal flaws. Do NOT slash scores for these, but ALWAYS mention them in the summary as 'reference info' so users can be prepared.
         4. NO USERNAMES: Never mention specific nicknames or usernames found in reviews. Use generic terms like 'some visitors'.
+
+        [MANDATORY — Contextual inference for food reviews; NEVER use 0 for taste or value]
+        - Do NOT look only for the literal words "taste" or "value/price." Infer from CONTEXT. Every restaurant review implies food quality and value in some way.
+        - TASTE (taste): Any description of food quality counts—e.g. salty, sweet, tough, fresh, delicious, "best ever", texture, flavor, menu quality, "would order again", complaints about the food itself. Map positive → higher scores, negative → lower, always within 1.0–5.0.
+        - VALUE (value): Any price/portion/satisfaction signal counts—e.g. expensive, cheap, small portions, "not worth it", "great deal", "generous", money's worth, cost vs. quality. Again 1.0–5.0 from context, not keyword search.
+        - For a restaurant, taste and value CANNOT be "missing" from the analysis. If explicit mentions are thin, still infer a reasonable 1.0–5.0 from overall tone. NEVER output 0 for taste or value.
+        - If some OTHER dimension (e.g. wait time) is hardly mentioned, use a neutral default of 3.0 for that dimension only—not 0, and never 0 for taste or value.
+        - JSON: All detail scores must be actual JSON float numbers, not strings, e.g. "taste": 4.2 (numeric), never "taste": "4" or "0".
         """
-        json_format = '{ "translatedName": "Name", "translatedAddress": "Address", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Summary including patterns, fatal flaws, and reference info (price/wait/parking). No nicknames.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        json_format = (
+            '{ "translatedName": "Name", "translatedAddress": "Address", "realScore": 1.0, "eventProbability": 0, '
+            '"aiSummary": "text", "details": { '
+            '"taste": 4.2, "value": 3.5, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }  '
+            '(realScore 1.0-5.0; details: each key is a number 1.0-5.0, floats only; taste & value are NEVER 0.0;'
+            " use 3.0 for weakly specified non-taste fields only.)"
+        )
     else:
-        instruction = "당신은 5개의 리뷰에서 조작 패턴을 찾아내는 '1차 필터링 요원'입니다. 기준점은 2.5점입니다."
+        instruction = (
+            "당신은 5개의 리뷰에서 조작 패턴을 찾아내는 '1차 필터링 요원'입니다. 기준점은 2.5점입니다. "
+            "details의 taste, value는 반드시 1.0~5.0 **실수(JSON 숫자)**; 0이나 문자열로 반환 절대 금지."
+        )
         guidelines = """
         [🔍 1차 방어선 감지 및 채점 논리]
         1. 앵무새 패턴 감지: 특정 키워드나 해시태그가 반복되면 조작 확률(eventProbability)을 높이세요.
         2. 치명적 결함(점수 감점 기준): 오직 [위생 불량(벌레, 이물질), 심각한 불친절(욕설, 반말, 손님 무시), 상한 음식]만 치명적 결함으로 간주하여 점수를 대폭 낮춥니다.
         3. 필수 참고 정보(요약 포함): 비싼 가격, 긴 웨이팅, 주차 불편은 '치명적 결함'이 아닙니다. 이를 이유로 점수를 대폭 깎지 마세요. 대신, 사용자가 참고할 수 있도록 요약문에 반드시 해당 내용(가격/웨이팅/주차 등)을 포함하여 서술하세요.
         4. 닉네임 언급 금지: 리뷰어의 닉네임이나 실명을 절대 직접 언급하지 마세요. '방문객들', '실사용자' 등의 표현을 사용하세요.
+
+        [필수 — 식당 리뷰 문맥 추론; taste·value는 0점 절대 금지]
+        - 리뷰에 "맛" "가성비"라는 단어가 **직접** 없어도 문맥을 읽어 점수를 매겨라. 키워드 매칭이 아니다.
+        - 맛(taste): "짜다, 달다, 질기다, 싱겁다, 쫄깃하다, 부드럽다, 비린내, 신선, 존맛, JMT, 입맛, 푸짐(맛 중심)" 등 **음식 품질·맛**에 관한 모든 서술은 taste 평가다. 반드시 1.0~5.0 (소수)로.
+        - 가성비(value): "비싸다, 쌈다, 양이 적다, 푸짐하다, 돈 아깝다, 혜자, 이 가격이면" 등 **가격·양·이만한 값**에 관한 서술은 value 평가다. 역시 1.0~5.0, 절대 0 아님.
+        - 음식점 맛(taste)과 가성비(value)는 논리상 리뷰가 있으면 반드시 추론 가능하다. 정보가 희박하면 **전체 톤**에서 추정하라. **taste와 value에 0.0을 출력하는 것은 금지**다.
+        - "맛/가성비" 외 항목(대기, 서비스만 언급 등)이 거의 없을 때만, 그 **해당 축**에 한해 3.0 **기본 점**을 쓸 수 있다. 0.0이 아니다.
+        - JSON의 details.* 점수는 **반드시 숫자형(실수)**. 예: "taste": 4.5 — 따옴표로 감싼 문자열 금지. 0이 아닌 1.0~5.0.
         """
-        json_format = '{ "translatedName": "가게 이름", "translatedAddress": "가게 주소", "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "조작 정황, 치명적 단점, 그리고 참고 정보(가격/웨이팅/주차)를 포함하여 1~2줄로 요약하세요. 닉네임 언급은 금지합니다.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        json_format = (
+            '{ "translatedName": "가게 이름", "translatedAddress": "가게 주소", "realScore": 1.0, "eventProbability": 0, '
+            '"aiSummary": "…", "details": { "taste": 4.2, "value": 3.5, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }  '
+            "(realScore 1.0-5.0; details는 각각 1.0-5.0 **실수**; taste·value는 **절대 0.0 사용 금지**;"
+            " 언급 없는 사소 항목만 3.0 기본.)"
+        )
     
     return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nInput Data: Name: {place_info['name']}\nReviews: {' '.join(place_info['reviews'])}"
 
 def get_deep_prompt(lang, place_name, reviews):
     reviews_text = "\n".join(reviews)
     if lang == "en":
-        instruction = "You are a 'Chief Culinary Profiler' analyzing 25 raw reviews. Base score is 2.5."
+        instruction = (
+            "You are a 'Chief Culinary Profiler' analyzing 25 raw reviews. Base score is 2.5. "
+            "details.taste and details.value MUST be JSON float numbers 1.0-5.0, never 0, inferred from context."
+        )
         guidelines = """
         [Deep Analysis Logic]
         1. Profiling: Prioritize detailed reviews over simple praise.
@@ -76,10 +112,24 @@ def get_deep_prompt(lang, place_name, reviews):
         3. Reference Info: Price, waiting, and parking issues must be mentioned in the summary for user reference, but they are NOT fatal flaws that crush the score.
         4. NO USERNAMES: Absolutely no mention of reviewer nicknames or IDs.
         5. Practical Tip: Extract one actionable tip.
+
+        [MANDATORY — Context inference; details.taste and details.value MUST never be 0.0]
+        - Infer from CONTEXT, not from searching for the words "taste" or "value." For restaurant reviews, taste and value are always inferable in the 1.0–5.0 range.
+        - TASTE: salty, sweet, tough, fresh, delicious, texture, flavor, "amazing food", "bad food", "would come back for the food"—all map to taste. Never 0.0. Never a string; output a JSON number float.
+        - VALUE: expensive, cheap, small portions, worth it, "generous for the price", "rip-off", value for money—all map to value. Never 0.0. Float only.
+        - If any detail dimension has almost no signal (e.g. wait time never mentioned), use 3.0 for THAT dimension as neutral default—never 0.0. Taste and value in particular: forbidden to output 0.0; infer from the whole text if needed.
+        - realScore: number 1.0–5.0. eventProbability: integer. details.*: all numeric floats, e.g. 4.5, not "4.5" strings.
         """
-        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "Para 1 (🔍 [Analysis]): Deep dive into flaws and reference info (price/wait/parking) without using nicknames. Para 2 (💡 [Visitor Tip]): One practical tip.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        json_format = (
+            '{ "realScore": 3.8, "eventProbability": 20, "aiSummary": "…", "details": { '
+            '"taste": 4.2, "value": 3.6, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }  '
+            "(All details values are JSON float numbers; taste and value: 1.0-5.0, NEVER 0.0; strings are forbidden for scores.)"
+        )
     else:
-        instruction = "당신은 25개의 카카오 리뷰를 해부하는 '전문 미식 프로파일러'입니다. 기준점은 2.5점입니다."
+        instruction = (
+            "당신은 25개의 카카오 리뷰를 해부하는 '전문 미식 프로파일러'입니다. 기준점은 2.5점입니다. "
+            "taste, value는 문맥에서 반드시 1.0~5.0 **실수(JSON number)**; 0.0 출력은 오류이며 절대 금지."
+        )
         guidelines = """
         [💡 전문 분석가 감지 논리]
         1. 리뷰어 분석: 깐깐한 리뷰어의 구체적인 평가를 중심으로 신뢰도를 파악하세요.
@@ -87,8 +137,20 @@ def get_deep_prompt(lang, place_name, reviews):
         3. 필수 참고 정보(요약 반영): 가격이 비싸거나 웨이팅이 길거나 주차가 힘든 점은 '치명적 단점'이 아니므로 점수를 파괴하는 근거로 쓰지 마세요. 하지만 방문객이 꼭 알아야 할 정보이므로 요약문(심층 분석 문단)에 반드시 '참고할 내용'으로 언급하세요.
         4. 닉네임 언급 절대 금지: 리뷰어의 닉네임(예: '골드', '은별' 등)을 절대 요약에 넣지 마세요. '일부 리뷰어', '방문자' 등으로 지칭하세요.
         5. 실전 꿀팁: 주차, 예약, 추천 메뉴 등 실질적인 팁 한 줄.
+
+        [필수 — 문맥 추론; details의 taste·value는 0.0 절대 금지, Float만]
+        - "맛" "가성비" 단어가 없어도 **전체 문맥**에서 추론한다. 키워드 매칭으로 점수를 0이나 누락시키지 말 것.
+        - taste: '짜다, 달다, 질기다, 쫄깃, 신선, 비린, 존맛, JMT, 입이 즐겁' 등 **음·식·질** 관련 언급→ 반드시 1.0~5.0 실수.
+        - value: '비싸, 싸, 양 적, 혜자, 돈 아깝, 가성비, 푸짐' 등 **가격·양** 관련 → 1.0~5.0, 0.0 **출력 금지**.
+        - 식당 리뷰에서 taste·value 둘 다 0.0이 되는 것은 **논리적 불가**. 언급이 약하면 **전체 톤**으로 추정. **0.0 대신 1.0~5.0**만 사용.
+        - time·service·hygiene 등 **그 축**에 대한 언급이 사실상 없을 때만 3.0 **기본값** (0.0이 아님). taste·value는 기본 3.0는 최후 수단(정보가 거의 없을 때)이고, **여전히 0.0은 쓰지 말 것**.
+        - JSON: realScore, details의 모든 점수는 **숫자(실수)**. 예: "taste": 4.3 — **문자열 "4.3"이나 0는 금지.**
         """
-        json_format = '{ "realScore": 1.0~5.0, "eventProbability": 0~100, "aiSummary": "두 문단 작성. 첫 문단은 \'🔍 [심층 분석]\'으로 시작하여 결함 및 참고 정보(가격/웨이팅/주차)를 닉네임 없이 서술. 두 번째 문단은 줄바꿈 후 \'💡 [실전 꿀팁]\'으로 시작.", "details": { "taste": "1~5", "value": "1~5", "service": "1~5", "time": "1~5", "hygiene": "1~5" } }'
+        json_format = (
+            '{ "realScore": 3.7, "eventProbability": 15, "aiSummary": "첫 문단은 🔍 [심층 분석]으로, 둘째는 💡 [실전 꿀팁]으로 시작하는 두 문단", "details": { '
+            '"taste": 4.1, "value": 3.8, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }  '
+            "(taste, value, service, time, hygiene: 각각 1.0~5.0 **JSON number**; taste·value=0.0 **절대 금지**.)"
+        )
     
     return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nTarget: {place_name}\nReviews: {reviews_text}"
 
