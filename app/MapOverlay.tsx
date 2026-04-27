@@ -1,10 +1,38 @@
 "use client";
 import React, { useState } from "react";
 // 💡 CustomOverlayMap이 추가되었습니다! (마커를 내 마음대로 예쁘게 꾸미는 도구)
-import { Map, MapMarker, CustomOverlayMap, useKakaoLoader } from "react-kakao-maps-sdk";
+import { Map, CustomOverlayMap, useKakaoLoader } from "react-kakao-maps-sdk";
 import { X, Navigation, Search } from "lucide-react";
 
-export default function MapOverlay({ onClose }: { onClose: () => void }) {
+type MapOverlayLabels = {
+  loading: string;
+  loadError: string;
+  findFlags: string;
+  searchPlaceholder: string;
+  searchNoResults: string;
+  geolocationError: string;
+};
+
+function pickFlagDisplayName(
+  place: { name?: string; romanizedName?: string; translatedName?: string },
+  preferRomanized: boolean
+): string {
+  const name = (place.name || "").trim();
+  if (!preferRomanized) return name;
+  const r = (place.romanizedName || "").trim();
+  const t = (place.translatedName || "").trim();
+  return r || t || name;
+}
+
+export default function MapOverlay({
+  onClose,
+  preferRomanizedLabels = false,
+  labels,
+}: {
+  onClose: () => void;
+  preferRomanizedLabels?: boolean;
+  labels: MapOverlayLabels;
+}) {
   const [loading, error] = useKakaoLoader({
     appkey: process.env.NEXT_PUBLIC_KAKAO_API_KEY || "", 
     libraries: ["services", "clusterer"],
@@ -15,7 +43,7 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
   
   // 💡 지도에 띄울 깃발 데이터를 담을 상태 (이름, 주소, 점수, 위도, 경도)
   const [markers, setMarkers] = useState<
-    { name: string; address: string; score: number; lat: number; lng: number; isTrophy: boolean }[]
+    { displayName: string; address: string; score: number; lat: number; lng: number; isTrophy: boolean }[]
   >([]);
 
   const defaultCenter = { lat: 37.4979, lng: 127.0276 };
@@ -31,7 +59,7 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
           const moveLatLon = new kakao.maps.LatLng(lat, lng);
           map.panTo(moveLatLon);
         },
-        () => alert("위치 정보를 가져올 수 없습니다.")
+        () => alert(labels.geolocationError)
       );
     }
   };
@@ -52,7 +80,7 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
         }
         map.setBounds(bounds);
       } else {
-        alert("해당 지역을 찾을 수 없습니다.");
+        alert(labels.searchNoResults);
       }
     });
   };
@@ -82,10 +110,11 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
 
         geocoder.addressSearch(cleanAddress, (result: any, status: any) => {
           if (status === kakao.maps.services.Status.OK) {
+            const displayName = pickFlagDisplayName(place, preferRomanizedLabels);
             setMarkers((prev) => [
               ...prev,
               {
-                name: place.name,
+                displayName,
                 address: place.address,
                 score,
                 isTrophy,
@@ -113,7 +142,7 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
               type="text"
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
-              placeholder="동네 이름 검색 (예: 연남동, 홍대)"
+              placeholder={labels.searchPlaceholder}
               className="w-full rounded-full border-none bg-white/90 px-12 py-3.5 text-sm font-medium shadow-lg backdrop-blur-md outline-none focus:ring-2 focus:ring-slate-900"
             />
           </div>
@@ -123,9 +152,9 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
         </form>
 
         {loading ? (
-          <div className="flex h-full items-center justify-center bg-slate-100 text-slate-500 font-medium">카카오 지도를 불러오는 중... 💛</div>
+          <div className="flex h-full items-center justify-center bg-slate-100 text-slate-500 font-medium">{labels.loading}</div>
         ) : error ? (
-          <div className="flex h-full items-center justify-center bg-slate-100 text-red-500 font-medium">지도 로딩 실패! API 키를 확인해주세요.</div>
+          <div className="flex h-full items-center justify-center bg-slate-100 text-red-500 font-medium">{labels.loadError}</div>
         ) : (
           <Map center={defaultCenter} style={{ width: "100%", height: "100%" }} level={4} onCreate={setMap}>
             
@@ -151,7 +180,7 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
                   
                   {/* 마우스를 올리면 가게 이름이 스르륵 나타남! */}
                   <div className="absolute top-[-30px] opacity-0 group-hover:opacity-100 transition-opacity bg-white text-slate-800 text-[10px] font-bold px-2 py-1 rounded-md shadow-md whitespace-nowrap">
-                    {marker.name}
+                    {marker.displayName}
                   </div>
                 </div>
               </CustomOverlayMap>
@@ -165,7 +194,7 @@ export default function MapOverlay({ onClose }: { onClose: () => void }) {
         </button>
         
         <button onClick={handleFindFlags} className="absolute bottom-6 left-1/2 z-10 -translate-x-1/2 rounded-full bg-slate-900 px-6 py-3.5 font-bold text-white shadow-xl transition hover:bg-slate-800 focus:scale-95">
-          이 근처 깃발 찾기 🚩
+          {labels.findFlags}
         </button>
 
       </div>

@@ -6,7 +6,6 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from scraper import search_and_get_reviews 
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -37,6 +36,161 @@ last_queries = {}
 user_requests = defaultdict(list)
 RATE_LIMIT = 1500 
 WINDOW_SECONDS = 86400
+
+
+def _prune_analyze_requests(client_ip: str) -> None:
+    now = time.time()
+    user_requests[client_ip] = [t for t in user_requests[client_ip] if now - t < WINDOW_SECONDS]
+
+
+def analyze_rate_limit_allows(client_ip: str) -> bool:
+    """일일 한도 미만이면 True (아직 과금 전 검사 전용)."""
+    _prune_analyze_requests(client_ip)
+    return len(user_requests[client_ip]) < RATE_LIMIT
+
+
+def record_chargeable_analyze(client_ip: str) -> None:
+    """구글 크롤 + OpenAI 1차 분석이 성공적으로 끝난 경우에만 1회 과금."""
+    _prune_analyze_requests(client_ip)
+    user_requests[client_ip].append(time.time())
+
+
+def extract_restaurant_tags(review_text: str) -> list[str]:
+    """룰 기반 키워드 분류 — 비용 없음. 리뷰·요약·상호 등 합친 문자열에 사용."""
+    if not review_text or not str(review_text).strip():
+        return []
+
+    text = str(review_text)
+    tags: list[str] = []
+    seen: set[str] = set()
+    low = text.lower()
+
+    def add(tag: str) -> None:
+        if tag not in seen:
+            seen.add(tag)
+            tags.append(tag)
+
+    # 음식
+    food_rules = [
+        (["삼겹살", "고기", "돼지", "삼겹", "목살", "갈비", "소고기", "구이", "한우", "pork", "bbq", "grill", "beef"], "고기"),
+        (["파스타", "피자", "스테이크", "양식", "브런치", "risotto", "pasta", "burger"], "양식"),
+        (["국밥", "찌개", "된장", "김치찌개", "순두부", "탕", "설렁탕", "감자탕", "해장"], "한식"),
+        (["초밥", "사시미", "회", "스시", "라멘", "돈카츠", "우동", "sushi", "ramen"], "일식"),
+        (["중식", "짜장", "마라", "탕수육", "짬뽕", "dim sum"], "중식"),
+        (["치킨", "닭갈비", "양념치킨", "후라이드", "chicken"], "치킨"),
+        (["카페", "커피", "디저트", "케이크", "브런치", "cafe", "coffee", "dessert"], "카페·디저트"),
+    ]
+    for keywords, label in food_rules:
+        if any((k in text) or (k.lower() in low) for k in keywords):
+            add(label)
+
+    # 분위기
+    vibe_rules = [
+        (["조용", "데이트", "분위기 좋", "로맨틱", "프라이빗", "조용한", "quiet", "date night", "romantic"], "조용한 데이트"),
+        (["시끄", "회식", "북적", "활기", "붐비", "소란", "noisy", "crowded", "loud"], "시끌벅적한"),
+    ]
+    for keywords, label in vibe_rules:
+        if any((k in text) or (k.lower() in low) for k in keywords):
+            add(label)
+
+    # 상황 / 페인포인트
+    pain_rules = [
+        (["웨이팅", "대기", "줄서", "줄 서", "줄이", "waiting", "queue", "line up"], "웨이팅 심함"),
+        (["비싸", "가격", "부담", "가격이", "expensive", "overpriced", "pricey"], "가격 부담"),
+        (["주차", "주차장", "parking"], "주차 불편"),
+        (["위생", "벌레", "이물", "hygiene", "dirty", "hair in"], "위생 이슈"),
+    ]
+    for keywords, label in pain_rules:
+        if any((k in text) or (k.lower() in low) for k in keywords):
+            add(label)
+
+    return tags
+
+
+def build_alternative_query(
+    lang: str,
+    tags: list[str],
+    real_score: float,
+    details: dict | None,
+    _place_name: str,
+) -> dict:
+    """상황·태그·점수 기반 대체 추천용 메타 (DB 검색은 추후 연동)."""
+    details = details or {}
+    try:
+        t_time = float(details.get("time", 3) or 3)
+    except (TypeError, ValueError):
+        t_time = 3.0
+    try:
+        t_value = float(details.get("value", 3) or 3)
+    except (TypeError, ValueError):
+        t_value = 3.0
+
+    food_order = ["고기", "양식", "한식", "일식", "중식", "치킨", "카페·디저트"]
+    target_category = next((x for x in food_order if x in tags), "맛집")
+
+    waiting_signal = "웨이팅 심함" in tags or t_time <= 2.5
+
+    if lang == "en":
+        if waiting_signal and "고기" in tags:
+            suggest = "Worried about infamous wait times at meat & grill spots here?"
+            avoid = "waiting"
+        elif waiting_signal:
+            suggest = "Is the long wait here a deal-breaker?"
+            avoid = "waiting"
+        elif "시끌벅적한" in tags and "조용한 데이트" in tags:
+            suggest = "Want a date night without the noise and crowd?"
+            avoid = "noise"
+        elif real_score < 2.8:
+            suggest = "Looking for a safer bet with stronger review signals?"
+            avoid = "low score"
+        elif t_value <= 2.5:
+            suggest = "Want similar food with better value for money?"
+            avoid = "value"
+        else:
+            suggest = "Explore other verified picks nearby in the same vein."
+            avoid = ""
+    else:
+        if waiting_signal and "고기" in tags:
+            suggest = "이곳의 악명 높은 웨이팅이 걱정되시나요?"
+            avoid = "웨이팅"
+        elif waiting_signal:
+            suggest = "여기 웨이팅·대기가 부담스러우신가요?"
+            avoid = "웨이팅"
+        elif "시끌벅적한" in tags and "조용한 데이트" in tags:
+            suggest = "데이트인데 시끄러운 곳은 피하고 싶으시죠?"
+            avoid = "소음"
+        elif real_score < 2.8:
+            suggest = "평점이 조금 불안하다면, 같은 분야의 검증 맛집은 어떠세요?"
+            avoid = "낮은 평가"
+        elif t_value <= 2.5:
+            suggest = "가격 부담이 크다고 느끼셨나요? 비슷한 메뉴를 더 합리적으로 즐길 수 있어요."
+            avoid = "가성비"
+        else:
+            suggest = "비슷한 분위기·메뉴의 다른 검증 맛집도 둘러볼까요?"
+            avoid = ""
+
+    qparts = [target_category] + ([avoid] if avoid else [])
+    return {
+        "suggest_message": suggest,
+        "target_category": target_category,
+        "avoid": avoid,
+        "query_hint": " ".join(qparts).strip(),
+    }
+
+
+def attach_tags_and_plan_b(
+    payload: dict,
+    lang: str,
+    text_parts: list,
+    score: float,
+    details: dict | None,
+    display_name: str,
+) -> None:
+    blob = " ".join(str(p) for p in text_parts if p is not None and str(p).strip())
+    tags = extract_restaurant_tags(blob)
+    payload["tags"] = tags
+    payload["alternative_query"] = build_alternative_query(lang, tags, float(score or 0), details, display_name)
+
 
 # ==========================================
 # 💡 프롬프트 설정 ('파괴'라는 단어 삭제, 점수 낮추기로 완화)
@@ -100,75 +254,65 @@ def get_fast_prompt(lang, place_info):
 
 def get_deep_prompt(lang, place_name, reviews):
     reviews_text = "\n".join(reviews)
+    technical_json = """
+        [Technical — scores & JSON typing]
+        details.taste and details.value: JSON floats 1.0–5.0 only, NEVER 0.0 (infer from context if thin). Other axes can default to 3.0 if unmentioned—not 0.0.
+        realScore: float 1.0–5.0. eventProbability: integer.
+        romanizedName: required string — Revised Romanization of the venue Korean name so visitors can navigate (not a poetic English translation).
+    """
     if lang == "en":
         instruction = (
-            "You are a 'Chief Culinary Profiler' analyzing 25 raw reviews. Base score is 2.5. "
-            "details.taste and details.value MUST be JSON float numbers 1.0-5.0, never 0, inferred from context."
+            "You are a concise local gastronomy writer for foreigners visiting Korea, based on Kakao-place reviews only. Base score is 2.5. "
+            "details.taste and details.value MUST be JSON floats 1.0–5.0, never 0.0 (infer from thin context)."
         )
         guidelines = """
-        [Deep Analysis Logic]
-        1. Profiling: Prioritize detailed reviews over simple praise.
-        2. Strict 'Fatal Flaw': Only [Hygiene issues, Extreme Rudeness, Spoiled Food] significantly lower the score. 
-        3. Reference Info: Price, waiting, and parking issues must be mentioned in the summary for user reference, but they are NOT fatal flaws that crush the score.
-        4. NO USERNAMES: Absolutely no mention of reviewer nicknames or IDs.
-        5. Practical Tip: Extract one actionable tip.
+        [Tone & role — replace 'fake-review sentinel' mentality]
+        1) Role: Practical, dry, factual—like a local food guide handout for travelers/couples. No literary fluff. Deliver what matters to plan a meal.
+        2) Content priority FIRST in aiSummary: (a) must-try dishes/menu items diners praise, (b) wait-time tips/best timing, (c) vibe/ambiance. Fold hygiene only as clear warnings where relevant.
+        3) Downsides objectively: Grave issues (severe hygiene spoilage etc.) warn plainly. Ordinary gripes phrase as Things to note (e.g. "some diners found prices steep") — not melodrama.
+        4) romanizedName MUST be Revised Romanization of the venue name shown in Kakao/for navigation (Gamjatang, Mukja), NOT the meaning translated into unrelated English phrases (reject style like "Spicy Pork Bone Stew" as romanizedName). Menu names cited in Korean may be romanized the same way in the prose.
+        NO nicknames/usernames—use neutral terms.
 
-        [MANDATORY — Context inference; details.taste and details.value MUST never be 0.0]
-        - Infer from CONTEXT, not from searching for the words "taste" or "value." For restaurant reviews, taste and value are always inferable in the 1.0–5.0 range.
-        - TASTE: salty, sweet, tough, fresh, delicious, texture, flavor, "amazing food", "bad food", "would come back for the food"—all map to taste. Never 0.0. Never a string; output a JSON number float.
-        - VALUE: expensive, cheap, small portions, worth it, "generous for the price", "rip-off", value for money—all map to value. Never 0.0. Float only.
-        - If any detail dimension has almost no signal (e.g. wait time never mentioned), use 3.0 for THAT dimension as neutral default—never 0.0. Taste and value in particular: forbidden to output 0.0; infer from the whole text if needed.
-        - realScore: number 1.0–5.0. eventProbability: integer. details.*: all numeric floats, e.g. 4.5, not "4.5" strings.
         """
+        guidelines = guidelines.strip() + "\n" + technical_json
         json_format = (
-            '{ "realScore": 3.8, "eventProbability": 20, "aiSummary": "…", "details": { '
-            '"taste": 4.2, "value": 3.6, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }  '
-            "(All details values are JSON float numbers; taste and value: 1.0-5.0, NEVER 0.0; strings are forbidden for scores.)"
+            '{ "realScore": 4.1, "eventProbability": 15, '
+            '"romanizedName": "Gamjatang", '
+            '"aiSummary": "[🔍 Insight] concise facts + vibe + must-tries ; [💡 Practical note] waits/timing + one tip", '
+            '"details": { "taste": 4.2, "value": 3.8, "service": 3.0, "time": 3.0, "hygiene": 3.0 } } '
+            '(All numeric scores are JSON numbers, not strings; taste/value never 0.0.)'
         )
     else:
         instruction = (
-            "당신은 25개의 카카오 리뷰를 해부하는 '전문 미식 프로파일러'입니다. 기준점은 2.5점입니다. "
-            "taste, value는 문맥에서 반드시 1.0~5.0 **실수(JSON number)**; 0.0 출력은 오류이며 절대 금지."
+            "당신은 한국을 방문한 외국인 여행자·커플에게 **실무적으로** 도움이 되도록 카카오 리뷰만 근거로 짧게 쓰는 현지 미식 안내 에디터입니다. 기준점 2.5. "
+            "taste, value는 1.0~5.0 **실수(JSON)**; **0.0 금지**."
         )
         guidelines = """
-        [💡 전문 분석가 감지 논리]
-        1. 리뷰어 분석: 깐깐한 리뷰어의 구체적인 평가를 중심으로 신뢰도를 파악하세요.
-        2. 치명적 결함(감점 기준): [위생 불량, 심각한 불친절, 상한 음식]이 발견될 때만 점수를 대폭 삭감합니다.
-        3. 필수 참고 정보(요약 반영): 가격이 비싸거나 웨이팅이 길거나 주차가 힘든 점은 '치명적 단점'이 아니므로 점수를 파괴하는 근거로 쓰지 마세요. 하지만 방문객이 꼭 알아야 할 정보이므로 요약문(심층 분석 문단)에 반드시 '참고할 내용'으로 언급하세요.
-        4. 닉네임 언급 절대 금지: 리뷰어의 닉네임(예: '골드', '은별' 등)을 절대 요약에 넣지 마세요. '일부 리뷰어', '방문자' 등으로 지칭하세요.
-        5. 실전 꿀팁: 주차, 예약, 추천 메뉴 등 실질적인 팁 한 줄.
+        [톤·역할 — '조작 감시' 톤 폐기]
+        1) 역할: 문학적 과장 없이 건조·정확. 외국인이 메뉴·웨이팅·분위기를 현장에서 재현할 수 있게 돕는 로컬 가이드.
+        2) 요약(aiSummary)의 최우선: (①) 극찬하는 **추천 메뉴·Must-try**, (②) 웨이팅·방문 시간대 등 **실전 팁**, (③) 매장 **분위기(Vibe)**. 위생 등 치명적 이슈는 필요할 때만 경고 형태로 포함.
+        3) 단점: 위생 불량 등 **치명적** 문제는 명확히. 단순 불만은 "일부 방문객은 가격이 비싸다고 느낌"처럼 **참고사항(Things to note)** 톤.
+        4) 로마자(romanizedName): 가게 이름·메뉴를 영작 **의역**하지 말고, 한글 발음을 **통용 로마자 표기**(가제 → Gaje, 감자탕 → Gamjatang)로 부여하여 길 찾기·통역에 적합하게. 번역 타입 이름을 romanizedName에 넣지 말 것.
 
-        [필수 — 문맥 추론; details의 taste·value는 0.0 절대 금지, Float만]
-        - "맛" "가성비" 단어가 없어도 **전체 문맥**에서 추론한다. 키워드 매칭으로 점수를 0이나 누락시키지 말 것.
-        - taste: '짜다, 달다, 질기다, 쫄깃, 신선, 비린, 존맛, JMT, 입이 즐겁' 등 **음·식·질** 관련 언급→ 반드시 1.0~5.0 실수.
-        - value: '비싸, 싸, 양 적, 혜자, 돈 아깝, 가성비, 푸짐' 등 **가격·양** 관련 → 1.0~5.0, 0.0 **출력 금지**.
-        - 식당 리뷰에서 taste·value 둘 다 0.0이 되는 것은 **논리적 불가**. 언급이 약하면 **전체 톤**으로 추정. **0.0 대신 1.0~5.0**만 사용.
-        - time·service·hygiene 등 **그 축**에 대한 언급이 사실상 없을 때만 3.0 **기본값** (0.0이 아님). taste·value는 기본 3.0는 최후 수단(정보가 거의 없을 때)이고, **여전히 0.0은 쓰지 말 것**.
-        - JSON: realScore, details의 모든 점수는 **숫자(실수)**. 예: "taste": 4.3 — **문자열 "4.3"이나 0는 금지.**
+        닉네임 금지. '일부 방문자' 등 표현 사용.
+
         """
+        guidelines = guidelines.strip() + "\n" + technical_json
         json_format = (
-            '{ "realScore": 3.7, "eventProbability": 15, "aiSummary": "첫 문단은 🔍 [심층 분석]으로, 둘째는 💡 [실전 꿀팁]으로 시작하는 두 문단", "details": { '
-            '"taste": 4.1, "value": 3.8, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }  '
-            "(taste, value, service, time, hygiene: 각각 1.0~5.0 **JSON number**; taste·value=0.0 **절대 금지**.)"
+            '{ "realScore": 4.0, "eventProbability": 12, '
+            '"romanizedName": "Gamjatang", '
+            '"aiSummary": "[🔍 심층 분석] … [💡 실전 꿀팁] … (두 블록, 구두 닉네임 없음)", '
+            '"details": { "taste": 4.1, "value": 3.7, "service": 3.0, "time": 3.0, "hygiene": 3.0 } } '
+            "(scores는 숫자 실수 필드만; taste·value=0.0 불가)"
         )
-    
+
     return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nTarget: {place_name}\nReviews: {reviews_text}"
 
 app = FastAPI()
 
 @app.middleware("http")
 async def limit_requests(request: Request, call_next):
-    if request.url.path == "/api/analyze":
-        client_ip = request.client.host
-        now = time.time()
-        user_requests[client_ip] = [t for t in user_requests[client_ip] if now - t < WINDOW_SECONDS]
-        
-        if len(user_requests[client_ip]) >= RATE_LIMIT:
-            return JSONResponse(
-                status_code=429, 
-                content={"detail": "하루 검색 횟수를 모두 사용하셨습니다! 내일 다시 찾아주세요. 🚀"}
-            )
-        user_requests[client_ip].append(now)
+    # /api/analyze 과금은 Mongo 캐시 미스 + OpenAI 성공 시에만 record_chargeable_analyze 로 처리 (캐시 히트는 미과금).
     return await call_next(request)
 
 ALLOWED_ORIGINS = [
@@ -452,6 +596,7 @@ def run_kakao_advanced_analysis(query: str, place_name_raw: str, address: str, l
                 if kakao_score >= 3.5:
                     set_payload["map_flag"] = {
                         "name": name_clean or kakao_query,
+                        "romanizedName": (ai_data.get("romanizedName") or "").strip(),
                         "address": address,
                         "realScore": kakao_score,
                         "isTrophy": kakao_score >= 4.0,
@@ -519,12 +664,41 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
                         background_tasks.add_task(
                             run_kakao_advanced_analysis, query, result_data["name"], address, lang
                         )
-                        
+
+                    kd = result_data.get("kakao_data") if isinstance(result_data.get("kakao_data"), dict) else None
+                    text_parts = [
+                        result_data.get("aiSummary") or "",
+                        result_data.get("name") or "",
+                        query or "",
+                    ]
+                    score_fb = float(result_data.get("realScore") or 0)
+                    det_fb = dict(result_data.get("details") or {})
+                    if kd:
+                        text_parts.append(kd.get("aiSummary") or "")
+                        score_fb = float(kd.get("realScore") or score_fb)
+                        if kd.get("details"):
+                            det_fb = dict(kd.get("details") or {})
+                    attach_tags_and_plan_b(
+                        result_data,
+                        lang,
+                        text_parts,
+                        score_fb,
+                        det_fb,
+                        (result_data.get("name") or query or ""),
+                    )
+
                     return result_data
 
     place_info = search_and_get_reviews(query)
-    if not place_info: raise HTTPException(status_code=404)
-    
+    if not place_info:
+        raise HTTPException(status_code=404)
+
+    if not analyze_rate_limit_allows(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="하루 검색 횟수를 모두 사용하셨습니다! 내일 다시 찾아주세요. 🚀",
+        )
+
     try:
         prompt = get_fast_prompt(lang, place_info)
         response = client.chat.completions.create(
@@ -538,6 +712,15 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
             "address": ai_data.get("translatedAddress") or place_info['address'], 
             "rating": place_info['rating'], "isNewDiscovery": True, "has_advanced": False
         }
+
+        attach_tags_and_plan_b(
+            final_result,
+            lang,
+            [" ".join(place_info["reviews"]), place_info["name"], query],
+            float(ai_data.get("realScore") or 0),
+            ai_data.get("details"),
+            final_result["name"],
+        )
         
         if collection is not None:
             update_data = {
@@ -551,6 +734,8 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
         background_tasks.add_task(
             run_kakao_advanced_analysis, query, place_info["name"], address, lang
         )
+
+        record_chargeable_analyze(client_ip)
         
         return final_result
 
@@ -591,9 +776,18 @@ def get_map_flags():
             if score < 3.5:
                 continue
             is_trophy = bool(mf.get("isTrophy", score >= 4.0))
+            translated_name = (mf.get("translatedName") or "").strip()
+            if not translated_name:
+                for res_key in ("result_en", "result_ko"):
+                    r = doc.get(res_key) or {}
+                    translated_name = (r.get("translatedName") or "").strip()
+                    if translated_name:
+                        break
             flags.append(
                 {
                     "name": name,
+                    "romanizedName": (mf.get("romanizedName") or "").strip(),
+                    "translatedName": translated_name,
                     "address": address,
                     "score": score,
                     "isTrophy": is_trophy,

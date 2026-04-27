@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Loader2, Search, Map } from "lucide-react";
-import MapOverlay from "./MapOverlay"; 
+import MapOverlay from "./MapOverlay";
+import PlanBSection from "./PlanBSection";
+import type { PlanBPayload } from "./PlanBSection";
 import confetti from "canvas-confetti";
 
 type Lang = "ko" | "en";
@@ -55,6 +57,17 @@ const translations: Record<
     kakaoFlagBanner: string;
     kakaoTrophyNotification: string;
     kakaoFlagNotification: string;
+    advancedSearchWaiting: string;
+    mapViewButton: string;
+    mapOverlayLoading: string;
+    mapOverlayLoadError: string;
+    mapOverlayFindFlags: string;
+    mapOverlaySearchPlaceholder: string;
+    mapOverlaySearchNoResults: string;
+    mapOverlayGeolocationError: string;
+    planBSectionBadge: string;
+    planBFootnote: string;
+    planBComingSoon: string;
   }
 > = {
   ko: {
@@ -108,6 +121,17 @@ const translations: Record<
       "🏆 고급 분석 완료: 4.0점 이상 황금 트로피 식당으로 확인되었습니다!",
     kakaoFlagNotification:
       "🚩 고급 분석 완료: 3.5점 이상 검증된 맛집으로 확인되었습니다!",
+    advancedSearchWaiting: "조금만 기다려주세요. 20초 내에 고급 검색 결과가 나옵니다.",
+    mapViewButton: "지도 보기",
+    mapOverlayLoading: "카카오 지도를 불러오는 중... 💛",
+    mapOverlayLoadError: "지도 로딩 실패! API 키를 확인해주세요.",
+    mapOverlayFindFlags: "이 근처 깃발 찾기 🚩",
+    mapOverlaySearchPlaceholder: "동네 이름 검색 (예: 연남동, 홍대)",
+    mapOverlaySearchNoResults: "해당 지역을 찾을 수 없습니다.",
+    mapOverlayGeolocationError: "위치 정보를 가져올 수 없습니다.",
+    planBSectionBadge: "Plan B · 상황 맞춤 대체 추천",
+    planBFootnote: "실제 근처 검색·DB 연동은 곧 이 버튼에 연결될 예정입니다.",
+    planBComingSoon: "준비 중입니다. 다음 업데이트에서 만나요!",
   },
   en: {
     loadingMessages: [
@@ -160,6 +184,17 @@ const translations: Record<
       "🏆 Advanced analysis complete: scored 4.0+ — a gold-trophy level spot!",
     kakaoFlagNotification:
       "🚩 Advanced analysis complete: scored 3.5+ — a verified pick!",
+    advancedSearchWaiting: "Please wait. Deep analysis results usually appear within 20 seconds.",
+    mapViewButton: "View map",
+    mapOverlayLoading: "Loading map…",
+    mapOverlayLoadError: "Map failed to load. Please check your API key.",
+    mapOverlayFindFlags: "Find nearby flags 🚩",
+    mapOverlaySearchPlaceholder: "Search area (e.g. Yeonnam, Hongdae)",
+    mapOverlaySearchNoResults: "That area could not be found.",
+    mapOverlayGeolocationError: "Could not read your location.",
+    planBSectionBadge: "Plan B · situational picks",
+    planBFootnote: "Nearby verified search will plug into this button in a future update.",
+    planBComingSoon: "Coming soon in a future release.",
   },
 };
 
@@ -202,12 +237,21 @@ export default function HomePage() {
   const [goldFlags, setGoldFlags] = useState(0);
   const [userDailyCount, setUserDailyCount] = useState(0);
   const [kakaoPollEnabled, setKakaoPollEnabled] = useState(false);
+  const [planB, setPlanB] = useState<PlanBPayload | null>(null);
 
   const isCritical = showResult && realScore !== null && realScore <= 2.4;
 
   const googleScore = basicData?.score ?? 0;
   const kakaoScore = kakaoData?.realScore ?? 0;
   const scoreDiff = parseFloat((googleScore - kakaoScore).toFixed(1));
+
+  /** EN + 고급 뷰: 로마자/번역 이름(지도·깃발 레이블과 동일 규칙) */
+  const advancedEnPlaceLabel =
+    lang === "en" && isAdvancedView && hasAdvanced && kakaoData
+      ? [kakaoData?.romanizedName, kakaoData?.translatedName, basicData?.translatedName]
+          .map((s: unknown) => (typeof s === "string" ? s.trim() : ""))
+          .find((s) => s.length > 0) ?? ""
+      : "";
 
 
   const setLanguage = (nextLang: Lang) => {
@@ -281,6 +325,10 @@ export default function HomePage() {
           setKakaoData(data.kakao_data);
           setHasAdvanced(true);
           setKakaoPollEnabled(false);
+          setPlanB({
+            tags: Array.isArray(data.tags) ? data.tags : [],
+            alternative_query: data.alternative_query ?? null,
+          });
         }
       } catch {
         /* keep polling */
@@ -358,6 +406,7 @@ export default function HomePage() {
     setBasicData(null);
     setIsAdvancedView(false);
     setKakaoPollEnabled(false);
+    setPlanB(null);
     kakaoTrophyFlagAlertKey = null;
 
     const fetchSearchResults = async () => {
@@ -381,7 +430,7 @@ export default function HomePage() {
   };
 
   const handleAnalyzePlace = (place: { name: string; address: string }) => {
-    if (userDailyCount >= 1500) {
+    if (userDailyCount >= 15) {
       alert(translations[lang].limitExceeded);
       return;
     }
@@ -410,13 +459,16 @@ export default function HomePage() {
 
         if (!response.ok) throw new Error("Analyze response not ok");
 
-        const newCount = userDailyCount + 1;
-        setUserDailyCount(newCount);
-        const today = new Date().toLocaleDateString();
-        localStorage.setItem('zzinview_usage', JSON.stringify({ date: today, count: newCount }));
-
         const data = await response.json();
         console.log("🤖 AI가 보낸 원본 데이터:", data);
+
+        // 일일 에너지: Mongo 캐시 히트(isNewDiscovery === false)에는 차감하지 않음. 신규 AI 분석만 1회 차감.
+        if (data.isNewDiscovery === true) {
+          const newCount = userDailyCount + 1;
+          setUserDailyCount(newCount);
+          const today = new Date().toLocaleDateString();
+          localStorage.setItem("zzinview_usage", JSON.stringify({ date: today, count: newCount }));
+        }
 
         const score = data.realScore ?? data.score ?? 0;
         const eProb = data.eventProbability ?? 0;
@@ -428,7 +480,18 @@ export default function HomePage() {
         setEventProb(eProb);
         setAiSummary(summary);
         setChartDetails(details);
-        setBasicData({ score, eProb, summary, details });
+        setBasicData({
+          score,
+          eProb,
+          summary,
+          details,
+          translatedName: data.translatedName as string | undefined,
+        });
+
+        setPlanB({
+          tags: Array.isArray(data.tags) ? data.tags : [],
+          alternative_query: data.alternative_query ?? null,
+        });
 
         // 💡 2. 고급(카카오) 데이터: 첫 응답에 있으면 바로, 없으면 백그라운드 완료까지 폴링
         if (data.has_advanced && data.kakao_data) {
@@ -461,7 +524,20 @@ export default function HomePage() {
 
   return (
     <>
-      {isMapOpen && <MapOverlay onClose={() => setIsMapOpen(false)} />}
+      {isMapOpen && (
+        <MapOverlay
+          onClose={() => setIsMapOpen(false)}
+          preferRomanizedLabels={lang === "en" && isAdvancedView}
+          labels={{
+            loading: translations[lang].mapOverlayLoading,
+            loadError: translations[lang].mapOverlayLoadError,
+            findFlags: translations[lang].mapOverlayFindFlags,
+            searchPlaceholder: translations[lang].mapOverlaySearchPlaceholder,
+            searchNoResults: translations[lang].mapOverlaySearchNoResults,
+            geolocationError: translations[lang].mapOverlayGeolocationError,
+          }}
+        />
+      )}
 
       <main className={`min-h-screen flex items-center justify-center px-4 py-10 transition-colors duration-1000 ${isCritical ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
         <div className="w-full max-w-xl">
@@ -484,7 +560,7 @@ export default function HomePage() {
                 className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:text-blue-600"
               >
                 <Map className="h-4 w-4" />
-                지도 보기
+                {translations[lang].mapViewButton}
               </button>
 
               <div className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
@@ -526,6 +602,11 @@ export default function HomePage() {
                       }`}>
                         {isAdvancedView ? translations[lang].advancedStatus : translations[lang].statusDone}
                       </span>
+                      {advancedEnPlaceLabel ? (
+                        <p className={`mt-2 text-base font-semibold tracking-tight ${isCritical ? "text-slate-200" : "text-slate-800"}`}>
+                          {advancedEnPlaceLabel}
+                        </p>
+                      ) : null}
 
                       {/* 💡 1. 가짜 리뷰 정황 경고 (오직 '기본 검색' 화면에서만 뜸!) */}
                       {!isAdvancedView && eventProb >= 70 && (
@@ -686,9 +767,7 @@ export default function HomePage() {
                     
                     {!hasAdvanced && (
                       <div className="w-full rounded-xl border border-dashed border-slate-300 bg-slate-50/80 px-4 py-3 text-sm font-medium text-slate-500 text-center shadow-sm mt-2">
-                        ⏳ {lang === "ko" 
-                          ? "고급 검색 준비 중 (약 30초 후 다시 검색해주세요)" 
-                          : "Preparing deep analysis (Search again in 30s)"}
+                        ⏳ {translations[lang].advancedSearchWaiting}
                       </div>
                     )}
 
@@ -730,6 +809,17 @@ export default function HomePage() {
                       {translations[lang].searchAgain}
                     </button>
                   </div>
+
+                  <PlanBSection
+                    lang={lang}
+                    data={planB}
+                    isCritical={!!isCritical}
+                    labels={{
+                      badge: translations[lang].planBSectionBadge,
+                      footnote: translations[lang].planBFootnote,
+                      comingSoon: translations[lang].planBComingSoon,
+                    }}
+                  />
 
                 </div>
               </div>
