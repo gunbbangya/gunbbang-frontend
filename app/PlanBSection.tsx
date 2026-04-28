@@ -2,11 +2,17 @@
 
 export type PlanBPayload = {
   tags: string[];
+  /** Romanized sub-tags (Samgyeopsal, K-BBQ, …) for foreigner-friendly UI */
+  romanized_food_for_ui?: string[];
+  /** 신뢰도 방어: 근거 없으면 null — Plan B UI 비노출 */
   alternative_query: {
-    suggest_message: string;
+    suggest_message: string | null;
     target_category: string;
+    target_category_ko?: string;
+    primary_romanized_food?: string;
     avoid: string;
     query_hint?: string;
+    worry_id?: string;
   } | null;
 };
 
@@ -27,11 +33,27 @@ type Props = {
 
 export default function PlanBSection({ lang, data, isCritical, labels }: Props) {
   const aq = data?.alternative_query;
-  if (!aq?.suggest_message) return null;
+  const sm = aq?.suggest_message;
+  if (
+    aq == null ||
+    sm == null ||
+    typeof sm !== "string" ||
+    sm.trim() === ""
+  ) {
+    return null;
+  }
 
   const cat = (aq.target_category || "맛집").trim();
+  const catKo = (aq.target_category_ko || "").trim();
+  const r0 = (aq.primary_romanized_food || "").trim();
   const cta =
-    lang === "en" ? `See verified ${cat} picks nearby` : `근처 검증된 ${cat} 맛집 보기`;
+    lang === "en"
+      ? r0
+        ? `See verified ${r0} · ${cat} nearby`
+        : `See verified ${cat} picks nearby`
+      : r0 && catKo
+        ? `근처 검증된 ${r0} · ${catKo} 맛집 보기`
+        : `근처 검증된 ${catKo || cat} 맛집 보기`;
 
   return (
     <section
@@ -55,12 +77,16 @@ export default function PlanBSection({ lang, data, isCritical, labels }: Props) 
           isCritical ? "text-white" : "text-slate-900"
         }`}
       >
-        {aq.suggest_message}
+        {sm}
       </h3>
 
-      {data?.tags && data.tags.length > 0 ? (
-        <div className="mt-4 flex flex-wrap gap-2" aria-label="rule-based tags">
-          {data.tags.map((t) => (
+      {(data?.romanized_food_for_ui && data.romanized_food_for_ui.length > 0) ||
+      (data?.tags && data.tags.length > 0) ? (
+        <div className="mt-4 flex flex-wrap gap-2" aria-label="food & situation tags">
+          {(data.romanized_food_for_ui && data.romanized_food_for_ui.length > 0
+            ? data.romanized_food_for_ui
+            : data.tags
+          ).map((t) => (
             <span
               key={t}
               className={`rounded-full px-3 py-1 text-[11px] font-bold border ${

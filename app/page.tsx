@@ -327,6 +327,9 @@ export default function HomePage() {
           setKakaoPollEnabled(false);
           setPlanB({
             tags: Array.isArray(data.tags) ? data.tags : [],
+            romanized_food_for_ui: Array.isArray(data.romanized_food_for_ui)
+              ? data.romanized_food_for_ui
+              : [],
             alternative_query: data.alternative_query ?? null,
           });
         }
@@ -490,6 +493,9 @@ export default function HomePage() {
 
         setPlanB({
           tags: Array.isArray(data.tags) ? data.tags : [],
+          romanized_food_for_ui: Array.isArray(data.romanized_food_for_ui)
+            ? data.romanized_food_for_ui
+            : [],
           alternative_query: data.alternative_query ?? null,
         });
 
@@ -810,16 +816,20 @@ export default function HomePage() {
                     </button>
                   </div>
 
-                  <PlanBSection
-                    lang={lang}
-                    data={planB}
-                    isCritical={!!isCritical}
-                    labels={{
-                      badge: translations[lang].planBSectionBadge,
-                      footnote: translations[lang].planBFootnote,
-                      comingSoon: translations[lang].planBComingSoon,
-                    }}
-                  />
+                  {planB?.alternative_query != null &&
+                    typeof planB.alternative_query.suggest_message === "string" &&
+                    planB.alternative_query.suggest_message.trim() !== "" && (
+                    <PlanBSection
+                      lang={lang}
+                      data={planB}
+                      isCritical={!!isCritical}
+                      labels={{
+                        badge: translations[lang].planBSectionBadge,
+                        footnote: translations[lang].planBFootnote,
+                        comingSoon: translations[lang].planBComingSoon,
+                      }}
+                    />
+                  )}
 
                 </div>
               </div>

@@ -55,56 +55,302 @@ def record_chargeable_analyze(client_ip: str) -> None:
     user_requests[client_ip].append(time.time())
 
 
-def extract_restaurant_tags(review_text: str) -> list[str]:
-    """룰 기반 키워드 분류 — 비용 없음. 리뷰·요약·상호 등 합친 문자열에 사용."""
+# --- 1차 정답지: 계층 음식 태그 (상위 Category + Romanized sub-tag + 키워드) ---
+FOOD_TAXONOMY: list[dict] = [
+    {
+        "id": "k_bbq",
+        "label_en": "K-BBQ",
+        "label_ko": "고기/구이",
+        "subs": [
+            {"r": "Samgyeopsal", "k": ["삼겹살", "삼겹", "samgyeopsal", "pork belly", "pork"]},
+            {"r": "Galbi", "k": ["갈비", "galbi", "꽃갈비", "갈빗살"]},
+            {"r": "Hanwoo", "k": ["한우", "소고기", "hanwoo", "wagyu", "beef korean"]},
+            {"r": "Bulgogi", "k": ["불고기", "bulgogi"]},
+            {"r": "Grilled Pork", "k": ["돼지구이", "돼지 고기", "pork bbq", "pork grill"]},
+        ],
+    },
+    {
+        "id": "k_soup",
+        "label_en": "K-Soup/Stew",
+        "label_ko": "찌개/탕",
+        "subs": [
+            {"r": "Kimchi-jjigae", "k": ["김치찌개", "kimchi jjigae", "kimchijjigae"]},
+            {"r": "Gukbap", "k": ["국밥", "gukbap", "gookbap"]},
+            {"r": "Gamjatang", "k": ["감자탕", "gamjatang", "pork neck"]},
+            {"r": "Samgyetang", "k": ["삼계탕", "samgyetang", "ginseng chicken"]},
+            {"r": "Sundubu", "k": ["순두부", "sundubu", "sundubu jjigae", "soondubu"]},
+        ],
+    },
+    {
+        "id": "k_noodle",
+        "label_en": "K-Noodles",
+        "label_ko": "면",
+        "subs": [
+            {"r": "Naengmyeon", "k": ["냉면", "naengmyeon", "naeng myeon", "mul naeng"]},
+            {"r": "Kalguksu", "k": ["칼국수", "kalguksu", "kal guksu"]},
+            {"r": "Ramyeon", "k": ["라면", "ramyeon", "ramyun", "instant noodles"]},
+            {"r": "Bibim-myeon", "k": ["비빔면", "bibim myeon", "spicy cold noodles"]},
+        ],
+    },
+    {
+        "id": "k_street",
+        "label_en": "K-Street Food",
+        "label_ko": "분식",
+        "subs": [
+            {"r": "Tteokbokki", "k": ["떡볶이", "tteokbokki", "teokbokki"]},
+            {"r": "Gimbap", "k": ["김밥", "gimbap", "kimbap"]},
+            {"r": "Fried Food", "k": ["튀김", "tempura", "fried"]},
+            {"r": "Jeon", "k": ["전", "jeon", "pancake", "korean pancake"]},
+        ],
+    },
+    {
+        "id": "japanese",
+        "label_en": "Japanese",
+        "label_ko": "일식",
+        "subs": [
+            {"r": "Sushi", "k": ["초밥", "스시", "sushi", "nigiri"]},
+            {"r": "Sashimi", "k": ["사시미", "사시", "sashimi", "회", "hweh"]},
+            {"r": "Ramen", "k": ["라멘", "ramen", "japanese ramen"]},
+            {"r": "Tonkatsu", "k": ["돈카츠", "tonkatsu", "pork cutlet"]},
+            {"r": "Donburi", "k": ["덮밥", "donburi", "gyudon", "don deopbap"]},
+        ],
+    },
+    {
+        "id": "western",
+        "label_en": "Western",
+        "label_ko": "양식",
+        "subs": [
+            {"r": "Pasta", "k": ["파스타", "pasta", "파스따"]},
+            {"r": "Pizza", "k": ["피자", "pizza"]},
+            {"r": "Steak", "k": ["스테이크", "steak", "등심스테"]},
+            {"r": "Burger", "k": ["버거", "burger", "햄버거"]},
+            {"r": "Salad", "k": ["샐러드", "salad"]},
+        ],
+    },
+    {
+        "id": "asian_global",
+        "label_en": "Asian/Global",
+        "label_ko": "아시아/글로벌",
+        "subs": [
+            {"r": "Dimsum", "k": ["딤섬", "dim sum", "dimsum", "shumai"]},
+            {"r": "Pho", "k": ["쌀국수", "pho", "베트남 쌀국"]},
+            {"r": "Thai", "k": ["타이", "태국", "thai", "똠양꿍", "팟타이", "pad thai"]},
+            {"r": "Curry", "k": ["카레", "curry", "katsu curry"]},
+        ],
+    },
+    {
+        "id": "cafe",
+        "label_en": "Cafe/Dessert",
+        "label_ko": "디저트",
+        "subs": [
+            {"r": "Coffee", "k": ["커피", "coffee", "아메", "espresso", "latte"]},
+            {"r": "Bingsu", "k": ["빙수", "bingsu", "patbingsu"]},
+            {"r": "Bakery", "k": ["빵집", "베이커리", "bakery", "bread"]},
+            {"r": "Traditional Tea", "k": ["전통차", "한차", "녹차", "omija"]},
+        ],
+    },
+    {
+        "id": "pub",
+        "label_en": "Pub/Bar",
+        "label_ko": "술집",
+        "subs": [
+            {"r": "Izakaya", "k": ["이자카야", "izakaya", "japanese bar"]},
+            {"r": "Beer", "k": ["맥주", "beer", "쏘맥", "draft"]},
+            {"r": "Makgeolli", "k": ["막걸리", "makgeolli", "막쌀"]},
+            {"r": "Wine Bar", "k": ["와인바", "wine bar", "와인"]},
+        ],
+    },
+]
+
+
+def _match_kw(text: str, low: str, keywords: list) -> bool:
+    return any((k in text) or (k.lower() in low) for k in keywords)
+
+
+def count_wait_line_signals(text: str) -> int:
+    """'줄' + '대기' 출현 횟수 합산 — 3회 이상이면 웨이팅 지옥 걱정 루트."""
+    if not text:
+        return 0
+    return text.count("줄") + text.count("대기")
+
+
+def classify_food_taxonomy(review_text: str) -> dict:
     if not review_text or not str(review_text).strip():
-        return []
-
+        return {
+            "categories": [],
+            "subtag_hits": [],
+            "romanized_labels": [],
+            "tags_flat": [],
+            "primary_label_en": "Restaurant",
+            "primary_label_ko": "맛집",
+        }
     text = str(review_text)
-    tags: list[str] = []
-    seen: set[str] = set()
     low = text.lower()
+    seen_cat: set = set()
+    subtag_hits: list[dict] = []
+    seen_r: set = set()
+    romanized_labels: list = []
+    tags_flat: list = []
 
-    def add(tag: str) -> None:
-        if tag not in seen:
-            seen.add(tag)
-            tags.append(tag)
+    for block in FOOD_TAXONOMY:
+        cid = block["id"]
+        for sub in block["subs"]:
+            if _match_kw(text, low, sub["k"]):
+                r = sub["r"]
+                if r not in seen_r:
+                    seen_r.add(r)
+                    romanized_labels.append(r)
+                    subtag_hits.append(
+                        {
+                            "category_id": cid,
+                            "category_en": block["label_en"],
+                            "category_ko": block["label_ko"],
+                            "romanized": r,
+                        }
+                    )
+        if any(h["category_id"] == cid for h in subtag_hits) and cid not in seen_cat:
+            seen_cat.add(cid)
+            tags_flat.append(block["label_en"])
+    for h in subtag_hits:
+        if h["romanized"] not in tags_flat:
+            tags_flat.append(h["romanized"])
 
-    # 음식
-    food_rules = [
-        (["삼겹살", "고기", "돼지", "삼겹", "목살", "갈비", "소고기", "구이", "한우", "pork", "bbq", "grill", "beef"], "고기"),
-        (["파스타", "피자", "스테이크", "양식", "브런치", "risotto", "pasta", "burger"], "양식"),
-        (["국밥", "찌개", "된장", "김치찌개", "순두부", "탕", "설렁탕", "감자탕", "해장"], "한식"),
-        (["초밥", "사시미", "회", "스시", "라멘", "돈카츠", "우동", "sushi", "ramen"], "일식"),
-        (["중식", "짜장", "마라", "탕수육", "짬뽕", "dim sum"], "중식"),
-        (["치킨", "닭갈비", "양념치킨", "후라이드", "chicken"], "치킨"),
-        (["카페", "커피", "디저트", "케이크", "브런치", "cafe", "coffee", "dessert"], "카페·디저트"),
+    categories = []
+    seen2 = set()
+    for h in subtag_hits:
+        if h["category_id"] not in seen2:
+            seen2.add(h["category_id"])
+            categories.append(
+                {"id": h["category_id"], "label_en": h["category_en"], "label_ko": h["category_ko"]}
+            )
+
+    primary_en = categories[0]["label_en"] if categories else "Restaurant"
+    primary_ko = categories[0]["label_ko"] if categories else "맛집"
+    return {
+        "categories": categories,
+        "subtag_hits": subtag_hits,
+        "romanized_labels": romanized_labels,
+        "tags_flat": tags_flat,
+        "primary_label_en": primary_en,
+        "primary_label_ko": primary_ko,
+    }
+
+
+def detect_worry_flags(text: str) -> dict:
+    """기획서 기반 걱정 포인트 플래그(키워드/횟수)."""
+    if not text:
+        t, low = "", ""
+    else:
+        t = str(text)
+        low = t.lower()
+    wcount = count_wait_line_signals(t)
+    wait_hell = wcount >= 3
+    return {
+        "wait_line_keyword_hits": wcount,
+        "wait_hell": wait_hell,
+        "value_explicit": _match_kw(
+            t, low, ["비싸다", "돈아깝", "돈 아깝", "창렬", "overpriced", "not worth the price", "overrated price"]
+        ),
+        "fake_or_hype_suspect": _match_kw(
+            t, low, ["광고", "조작", "가짜", "영혼없", "실망", "fake", "hype", "botted", "too hyped", "astroturf", "sponsored", "광고성"]
+        ),
+        "noise_complaint": _match_kw(
+            t, low, ["시끄", "정신없", "시장바닥", "회식", "noisy", "loud", "screaming", "chaotic"]
+        ),
+        "parking_pain": _match_kw(
+            t, low, ["주차", "주차장", "parking", "valet", "빈자리"]
+        ),
+        "hygiene_complaint": _match_kw(
+            t, low, ["더럽", "위생", "머리카락", "냄새", "벌레", "cockroach", "mold", "unclean", "hygiene", "drain", "냄새남"]
+        ),
+        "foreigner_barrier": _match_kw(
+            t, low, ["불친절", "장벽", "외국인", "한국어만", "language", "rude to tourist", "english", "no english"]
+        ),
+        "solo_dining_block": _match_kw(
+            t, low, ["1인불", "1인불가", "혼밥불", "2인부", "2인부터", "1인불", "최소 2인", "min 2 pax", "min two"]
+        ),
+    }
+
+
+def has_rule_based_signal(text: str) -> bool:
+    """정답지(음식/걱정/분위기) 키워드가 전혀 없으면 False — tags·Plan B를 만들지 않음."""
+    if not text or not str(text).strip():
+        return False
+    t = str(text)
+    low = t.lower()
+    fc = classify_food_taxonomy(t)
+    if fc.get("subtag_hits"):
+        return True
+    wf = detect_worry_flags(t)
+    if wf.get("wait_line_keyword_hits", 0) > 0:
+        return True
+    for key in (
+        "value_explicit",
+        "fake_or_hype_suspect",
+        "noise_complaint",
+        "parking_pain",
+        "hygiene_complaint",
+        "foreigner_barrier",
+        "solo_dining_block",
+    ):
+        if wf.get(key):
+            return True
+    vibe_kw = [
+        "조용",
+        "데이트",
+        "로맨틱",
+        "프라이빗",
+        "quiet",
+        "romantic",
+        "date night",
+        "시끄",
+        "북적",
+        "붐비",
+        "noisy",
+        "crowded",
+        "loud",
+        "정신없",
     ]
-    for keywords, label in food_rules:
-        if any((k in text) or (k.lower() in low) for k in keywords):
-            add(label)
+    if any((k in t) or (k.lower() in low) for k in vibe_kw):
+        return True
+    if "가성비" in t or "비싸" in t:
+        return True
+    return False
 
-    # 분위기
-    vibe_rules = [
-        (["조용", "데이트", "분위기 좋", "로맨틱", "프라이빗", "조용한", "quiet", "date night", "romantic"], "조용한 데이트"),
-        (["시끄", "회식", "북적", "활기", "붐비", "소란", "noisy", "crowded", "loud"], "시끌벅적한"),
-    ]
-    for keywords, label in vibe_rules:
-        if any((k in text) or (k.lower() in low) for k in keywords):
-            add(label)
 
-    # 상황 / 페인포인트
-    pain_rules = [
-        (["웨이팅", "대기", "줄서", "줄 서", "줄이", "waiting", "queue", "line up"], "웨이팅 심함"),
-        (["비싸", "가격", "부담", "가격이", "expensive", "overpriced", "pricey"], "가격 부담"),
-        (["주차", "주차장", "parking"], "주차 불편"),
-        (["위생", "벌레", "이물", "hygiene", "dirty", "hair in"], "위생 이슈"),
-    ]
-    for keywords, label in pain_rules:
-        if any((k in text) or (k.lower() in low) for k in keywords):
-            add(label)
-
-    return tags
+def classify_situation_tags(review_text: str, food_flat: list, w: dict) -> list[str]:
+    if not review_text or not str(review_text).strip():
+        b = set(food_flat)
+    else:
+        t = str(review_text)
+        low = t.lower()
+        b = set(food_flat)
+        v_rules = [
+            (["조용", "데이트", "로맨틱", "프라이빗", "quiet", "romantic", "date night"], "조용한 데이트"),
+            (["시끄", "북적", "붐비", "noisy", "crowded", "loud", "정신없는"], "시끌벅적한"),
+        ]
+        for kws, lab in v_rules:
+            if any((k in t) or (k.lower() in low) for k in kws):
+                b.add(lab)
+    if w.get("wait_hell"):
+        b.add("웨이팅 지옥")
+    elif w["wait_line_keyword_hits"] > 0 and not w.get("wait_hell"):
+        b.add("웨이팅 심함")
+    if w.get("value_explicit") or (review_text and ("비싸" in str(review_text) or "가성비" in str(review_text))):
+        b.add("가성비")
+    if w.get("hygiene_complaint"):
+        b.add("위생 이슈")
+    if w.get("fake_or_hype_suspect"):
+        b.add("리뷰/소문 의심")
+    if w.get("noise_complaint"):
+        b.add("소음/분위기")
+    if w.get("foreigner_barrier"):
+        b.add("언어/외국인 장벽")
+    if w.get("solo_dining_block"):
+        b.add("혼밥 제약")
+    if w.get("parking_pain"):
+        b.add("주차 불편")
+    return list(b)
 
 
 def build_alternative_query(
@@ -113,8 +359,13 @@ def build_alternative_query(
     real_score: float,
     details: dict | None,
     _place_name: str,
+    *,
+    food_classification: dict | None = None,
+    worry_flags: dict | None = None,
 ) -> dict:
-    """상황·태그·점수 기반 대체 추천용 메타 (DB 검색은 추후 연동)."""
+    """Plan B: 기획서 worry 테이블 + 점수 보조. target 은 음식 정답지 label_en/romanized."""
+    fc = food_classification or {}
+    wf = worry_flags or {}
     details = details or {}
     try:
         t_time = float(details.get("time", 3) or 3)
@@ -124,47 +375,131 @@ def build_alternative_query(
         t_value = float(details.get("value", 3) or 3)
     except (TypeError, ValueError):
         t_value = 3.0
+    try:
+        t_service = float(details.get("service", 3) or 3)
+    except (TypeError, ValueError):
+        t_service = 3.0
 
-    food_order = ["고기", "양식", "한식", "일식", "중식", "치킨", "카페·디저트"]
-    target_category = next((x for x in food_order if x in tags), "맛집")
+    target_category = (fc.get("primary_label_en") or "맛집").strip()
+    target_category_ko = (fc.get("primary_label_ko") or "맛집").strip()
+    rlabels = fc.get("romanized_labels") or []
+    primary_romanized = rlabels[0] if rlabels else target_category
 
-    waiting_signal = "웨이팅 심함" in tags or t_time <= 2.5
+    sk = list(rlabels)[:6]
+    if target_category and target_category not in sk:
+        sk.insert(0, target_category)
+
+    wait_hell = bool(wf.get("wait_hell"))
+    wait_soft = "웨이팅 심함" in tags or "웨이팅 지옥" in tags or t_time <= 2.5
+    parking_signal = "주차 불편" in tags
+    hygiene_signal = "위생 이슈" in tags
+    service_signal = t_service <= 2.5
+    value_signal = "가성비" in tags or t_value <= 2.5
+    value_explicit = bool(wf.get("value_explicit"))
+    fake_sus = bool(wf.get("fake_or_hype_suspect")) or "리뷰/소문 의심" in tags
+    noise_fl = bool(wf.get("noise_complaint")) or "소음/분위기" in tags
+    foreign_fl = bool(wf.get("foreigner_barrier")) or "언어/외국인 장벽" in tags
+    solo_fl = bool(wf.get("solo_dining_block")) or "혼밥 제약" in tags
+    low_score = real_score < 2.8
+    date_noise = "시끌벅적한" in tags and "조용한 데이트" in tags
+
+    suggest = ""
+    avoid = ""
+    worry_id = "default"
 
     if lang == "en":
-        if waiting_signal and "고기" in tags:
-            suggest = "Worried about infamous wait times at meat & grill spots here?"
+        if wait_hell:
+            worry_id = "wait_hell"
+            suggest = "Tired of the long line? 🚶‍♂️"
             avoid = "waiting"
-        elif waiting_signal:
-            suggest = "Is the long wait here a deal-breaker?"
-            avoid = "waiting"
-        elif "시끌벅적한" in tags and "조용한 데이트" in tags:
-            suggest = "Want a date night without the noise and crowd?"
+        elif fake_sus:
+            worry_id = "hype"
+            suggest = "Is this place overrated? 🤨"
+            avoid = "hype"
+        elif value_explicit or value_signal:
+            worry_id = "value"
+            suggest = "Too pricey for the portion? 💸"
+            avoid = "value"
+        elif noise_fl or date_noise:
+            worry_id = "noise"
+            suggest = "Looking for a quiet spot? 🤫"
             avoid = "noise"
-        elif real_score < 2.8:
+        elif hygiene_signal:
+            worry_id = "hygiene"
+            suggest = "Worried about cleanliness? ✨"
+            avoid = "hygiene"
+        elif foreign_fl:
+            worry_id = "foreigner"
+            suggest = "Struggling with the language barrier? 🌏"
+            avoid = "language"
+        elif solo_fl:
+            worry_id = "solo"
+            suggest = "Traveling alone? 🙋‍♂️"
+            avoid = "solo"
+        elif wait_soft:
+            worry_id = "wait"
+            suggest = f"Want similar {target_category} picks with a shorter wait?"
+            avoid = "waiting"
+        elif parking_signal:
+            worry_id = "parking"
+            suggest = "Parking a headache? Other verified spots nearby may be easier to access."
+            avoid = "parking"
+        elif service_signal:
+            worry_id = "service"
+            suggest = "Service left you uneasy? Try another pick with more consistent hospitality."
+            avoid = "service"
+        elif low_score:
+            worry_id = "low_score"
             suggest = "Looking for a safer bet with stronger review signals?"
             avoid = "low score"
-        elif t_value <= 2.5:
-            suggest = "Want similar food with better value for money?"
-            avoid = "value"
         else:
-            suggest = "Explore other verified picks nearby in the same vein."
+            suggest = "Explore other verified picks nearby in the same style."
             avoid = ""
     else:
-        if waiting_signal and "고기" in tags:
-            suggest = "이곳의 악명 높은 웨이팅이 걱정되시나요?"
+        if wait_hell:
+            worry_id = "wait_hell"
+            suggest = "악명 높은 웨이팅에 지치셨나요? 🚶‍♂️"
             avoid = "웨이팅"
-        elif waiting_signal:
-            suggest = "여기 웨이팅·대기가 부담스러우신가요?"
-            avoid = "웨이팅"
-        elif "시끌벅적한" in tags and "조용한 데이트" in tags:
-            suggest = "데이트인데 시끄러운 곳은 피하고 싶으시죠?"
+        elif fake_sus:
+            worry_id = "hype"
+            suggest = "소문난 잔치에 먹을 게 없을까 걱정되시나요? 🤨"
+            avoid = "소문/리뷰"
+        elif value_explicit or value_signal:
+            worry_id = "value"
+            suggest = "가성비 좋은 진짜 맛집을 찾고 계신가요? 💸"
+            avoid = "가성비"
+        elif noise_fl or date_noise:
+            worry_id = "noise"
+            suggest = "시끄러운 분위기 대신 대화하기 좋은 곳은 어떠세요? 🤫"
             avoid = "소음"
-        elif real_score < 2.8:
+        elif hygiene_signal:
+            worry_id = "hygiene"
+            suggest = "맛보다 위생이 더 신경 쓰이시나요? ✨"
+            avoid = "위생"
+        elif foreign_fl:
+            worry_id = "foreigner"
+            suggest = "외국인에게 친절한 검증된 맛집을 추천할게요. 🌏"
+            avoid = "언어"
+        elif solo_fl:
+            worry_id = "solo"
+            suggest = "눈치 보지 않고 혼자서도 즐길 수 있는 식당은 어떠세요? 🙋‍♂️"
+            avoid = "혼밥"
+        elif wait_soft:
+            worry_id = "wait"
+            suggest = f"{target_category_ko} 맛집인데 대기가 부담이시라면, 비슷한 메뉴에 웨이팅이 덜한 곳을 골라볼까요?"
+            avoid = "웨이팅"
+        elif parking_signal:
+            worry_id = "parking"
+            suggest = "주차가 막막하다면, 주차하기 수월한 근처 검증 맛집도 있어요."
+            avoid = "주차"
+        elif service_signal:
+            worry_id = "service"
+            suggest = "서비스가 걸렸다면, 응대가 안정적인 다른 곳을 찾아볼 수 있어요."
+            avoid = "서비스"
+        elif low_score:
+            worry_id = "low_score"
             suggest = "평점이 조금 불안하다면, 같은 분야의 검증 맛집은 어떠세요?"
             avoid = "낮은 평가"
-        elif t_value <= 2.5:
-            suggest = "가격 부담이 크다고 느끼셨나요? 비슷한 메뉴를 더 합리적으로 즐길 수 있어요."
-            avoid = "가성비"
         else:
             suggest = "비슷한 분위기·메뉴의 다른 검증 맛집도 둘러볼까요?"
             avoid = ""
@@ -173,8 +508,12 @@ def build_alternative_query(
     return {
         "suggest_message": suggest,
         "target_category": target_category,
+        "target_category_ko": target_category_ko,
+        "primary_romanized_food": primary_romanized,
         "avoid": avoid,
+        "worry_id": worry_id,
         "query_hint": " ".join(qparts).strip(),
+        "search_keywords": sk[:8],
     }
 
 
@@ -187,9 +526,29 @@ def attach_tags_and_plan_b(
     display_name: str,
 ) -> None:
     blob = " ".join(str(p) for p in text_parts if p is not None and str(p).strip())
-    tags = extract_restaurant_tags(blob)
-    payload["tags"] = tags
-    payload["alternative_query"] = build_alternative_query(lang, tags, float(score or 0), details, display_name)
+    if not has_rule_based_signal(blob):
+        payload["tags"] = []
+        payload["food_classification"] = classify_food_taxonomy("")
+        payload["worry_flags"] = {}
+        payload["romanized_food_for_ui"] = []
+        payload["alternative_query"] = None
+        return
+    fc = classify_food_taxonomy(blob)
+    wf = detect_worry_flags(blob)
+    merged = classify_situation_tags(blob, list(fc.get("tags_flat") or []), wf)
+    payload["tags"] = merged
+    payload["food_classification"] = fc
+    payload["worry_flags"] = wf
+    payload["romanized_food_for_ui"] = (fc.get("romanized_labels") or [])[:8]
+    payload["alternative_query"] = build_alternative_query(
+        lang,
+        merged,
+        float(score or 0),
+        details,
+        display_name,
+        food_classification=fc,
+        worry_flags=wf,
+    )
 
 
 # ==========================================
@@ -252,8 +611,9 @@ def get_fast_prompt(lang, place_info):
     
     return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nInput Data: Name: {place_info['name']}\nReviews: {' '.join(place_info['reviews'])}"
 
-def get_deep_prompt(lang, place_name, reviews):
-    reviews_text = "\n".join(reviews)
+def get_deep_prompt(lang, place_name, reviews, review_count: int | None = None):
+    reviews_text = "\n".join(reviews) if reviews else ""
+    n = int(review_count) if review_count is not None else (len(reviews) if reviews else 0)
     technical_json = """
         [Technical — scores & JSON typing]
         details.taste and details.value: JSON floats 1.0–5.0 only, NEVER 0.0 (infer from context if thin). Other axes can default to 3.0 if unmentioned—not 0.0.
@@ -306,7 +666,27 @@ def get_deep_prompt(lang, place_name, reviews):
             "(scores는 숫자 실수 필드만; taste·value=0.0 불가)"
         )
 
-    return f"{instruction}\n{guidelines}\nReturn strictly in this JSON format:\n{json_format}\nTarget: {place_name}\nReviews: {reviews_text}"
+    sparse_block = ""
+    if n < 15:
+        if lang == "en":
+            sparse_block = f"""
+[CAUTION — sparse review data]
+Only {n} Kakao reviews were collected (very few). You MUST:
+- Never sound definitive, absolute, or overconfident. Use careful hedging: e.g. "With limited data…", "Some commenters report…", "It is hard to generalize from so few reports…", "A few early impressions suggest may not represent everyone…".
+- End aiSummary with a final sentence in the same spirit as: "More reviews are needed for an accurate assessment" (natural English, same meaning).
+- Keep the closing disclaimer visible and honest about data limits.
+"""
+        else:
+            sparse_block = f"""
+[주의 — 수집 리뷰가 매우 적음]
+현재 수집된 리뷰는 {n}개입니다. 아래를 반드시 지키세요.
+- 단정적·확신하는 어조는 금지. "리뷰 수가 적어 확언하기 어렵지만~", "일부 의견에 따르면~" 등 **조심스러운(cautious) 표현**만 사용.
+- aiSummary **마지막 문장**에 '데이터가 부족하여 정확한 판단을 위해서는 추가 리뷰가 필요할 수 있으며, 더 많은 리뷰가 있으면 정확한 평가가 가능하다'는 **More reviews needed for an accurate assessment** 뉘앙스의 문구를 **반드시** 한글로 자연스럽게 넣을 것(영문 괄호는 선택).
+"""
+    return (
+        f"{instruction}\n{guidelines}{sparse_block}\nReturn strictly in this JSON format:\n{json_format}\n"
+        f"Target: {place_name}\nReviews: {reviews_text}"
+    )
 
 app = FastAPI()
 
@@ -580,7 +960,9 @@ def run_kakao_advanced_analysis(query: str, place_name_raw: str, address: str, l
                     collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}})
                 return
 
-            prompt = get_deep_prompt(lang, name_clean or kakao_query, reviews)
+            prompt = get_deep_prompt(
+                lang, name_clean or kakao_query, reviews, review_count=len(reviews)
+            )
             response = client.chat.completions.create(
                 model="gpt-4o-mini", response_format={ "type": "json_object" },
                 messages=[{"role": "system", "content": "You are a JSON generating assistant."}, {"role": "user", "content": prompt}]
