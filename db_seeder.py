@@ -1,19 +1,25 @@
 """
 서울 주요 상권 식당 정보를 카카오 로컬 API로 수집해 MongoDB에 적재하는 시드 스크립트.
 
-실행 전 최상단 상수에 KAKAO_REST_API_KEY, MONGO_URI를 입력하세요.
+실행 전 프로젝트 루트 `.env`에 `KAKAO_API_KEY`, `MONGO_URI`를 설정하세요.
 """
 
+import os
+import sys
 import time
 
 import pymongo
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+KAKAO_API_KEY = os.getenv("KAKAO_API_KEY")
+MONGO_URI = os.getenv("MONGO_URI")
 
 # ---------------------------------------------------------------------------
-# 설정 (여기에 키·URI 입력)
+# 고정 설정
 # ---------------------------------------------------------------------------
-KAKAO_REST_API_KEY = ""
-MONGO_URI = ""
 DB_NAME = "zzinview_db"
 COLLECTION_NAME = "places"
 
@@ -32,7 +38,7 @@ SLEEP_SEC = 0.5
 
 def fetch_places_for_query(session: requests.Session, query: str, page: int) -> list[dict]:
     """카카오 키워드 검색 한 페이지. 실패 시 빈 리스트."""
-    headers = {"Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"}
+    headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
     params = {
         "query": query,
         "category_group_code": "FD6",
@@ -58,12 +64,11 @@ def pick_address(doc: dict) -> str:
 
 
 def main() -> None:
-    if not KAKAO_REST_API_KEY.strip():
-        print("❌ KAKAO_REST_API_KEY가 비어 있습니다. 스크립트 상단에 REST API 키를 입력하세요.")
-        return
-    if not MONGO_URI.strip():
-        print("❌ MONGO_URI가 비어 있습니다. 스크립트 상단에 MongoDB 연결 문자열을 입력하세요.")
-        return
+    kakao_ok = KAKAO_API_KEY is not None and str(KAKAO_API_KEY).strip() != ""
+    mongo_ok = MONGO_URI is not None and str(MONGO_URI).strip() != ""
+    if not kakao_ok or not mongo_ok:
+        print("❌ .env 파일에 KAKAO_API_KEY와 MONGO_URI를 설정해주세요.")
+        sys.exit(1)
 
     print("=" * 60)
     print("🌱 ZzinView DB Seeder — 카카오 로컬 → MongoDB")

@@ -52,7 +52,7 @@ const translations: Record<
     advancedButton: string;
     returnBasic: string;
     advancedStatus: string;
-    /** 고급 화면 축하 배너 (카카오 realScore ≥ 3.5) */
+    /** 고급 화면 축하 배너 (심층 realScore ≥ 3.5) */
     kakaoTrophyBanner: string;
     kakaoFlagBanner: string;
     kakaoTrophyNotification: string;
@@ -68,6 +68,9 @@ const translations: Record<
     planBSectionBadge: string;
     planBFootnote: string;
     planBComingSoon: string;
+    advancedDeepFactTitle: string;
+    matchVerificationCaption: string;
+    advancedAnalyzeFailedTitle: string;
   }
 > = {
   ko: {
@@ -123,7 +126,7 @@ const translations: Record<
       "🚩 고급 분석 완료: 3.5점 이상 검증된 맛집으로 확인되었습니다!",
     advancedSearchWaiting: "조금만 기다려주세요. 20초 내에 고급 검색 결과가 나옵니다.",
     mapViewButton: "지도 보기",
-    mapOverlayLoading: "카카오 지도를 불러오는 중... 💛",
+    mapOverlayLoading: "지도를 불러오는 중…",
     mapOverlayLoadError: "지도 로딩 실패! API 키를 확인해주세요.",
     mapOverlayFindFlags: "이 근처 깃발 찾기 🚩",
     mapOverlaySearchPlaceholder: "동네 이름 검색 (예: 연남동, 홍대)",
@@ -132,6 +135,9 @@ const translations: Record<
     planBSectionBadge: "Plan B · 상황 맞춤 대체 추천",
     planBFootnote: "실제 근처 검색·DB 연동은 곧 이 버튼에 연결될 예정입니다.",
     planBComingSoon: "준비 중입니다. 다음 업데이트에서 만나요!",
+    advancedDeepFactTitle: "현지 로컬 DB 심층 팩트 체크",
+    matchVerificationCaption: "현지 로컬 DB 검증 기준:",
+    advancedAnalyzeFailedTitle: "심층 분석을 완료할 수 없습니다",
   },
   en: {
     loadingMessages: [
@@ -195,10 +201,22 @@ const translations: Record<
     planBSectionBadge: "Plan B · situational picks",
     planBFootnote: "Nearby verified search will plug into this button in a future update.",
     planBComingSoon: "Coming soon in a future release.",
+    advancedDeepFactTitle: "Deep fact check (local review DB)",
+    matchVerificationCaption: "Local DB verification basis:",
+    advancedAnalyzeFailedTitle: "Advanced analysis unavailable",
   },
 };
 
-/** 고급 분석(카카오) 트로피/깃발 알림을 React Strict Mode 이중 effect에서도 1회만 (같은 식당+세션) */
+/** 플랫폼 이름이 섞일 수 있는 백엔드 reason 문자열을 UI 표시용으로 마스킹 */
+function maskBackendReason(reason: unknown): string {
+  let s =
+    typeof reason === "string" ? reason : reason != null ? String(reason) : "";
+  if (!s.trim()) return "";
+  s = s.replace(/카카오맵/g, "로컬 데이터").replace(/카카오/g, "현지 리뷰");
+  return s;
+}
+
+/** 고급 분석 트로피/깃발 알림을 React Strict Mode 이중 effect에서도 1회만 (같은 식당+세션) */
 let kakaoTrophyFlagAlertKey: string | null = null;
 
 export default function HomePage() {
@@ -321,8 +339,15 @@ export default function HomePage() {
         });
         if (response.status === 429 || !response.ok) return;
         const data = await response.json();
-        if (data.has_advanced && data.kakao_data) {
-          setKakaoData(data.kakao_data);
+        const kd = data.kakao_data;
+        if (kd?.status === "error") {
+          setKakaoData(kd);
+          setHasAdvanced(true);
+          setKakaoPollEnabled(false);
+          return;
+        }
+        if (data.has_advanced && kd) {
+          setKakaoData(kd);
           setHasAdvanced(true);
           setKakaoPollEnabled(false);
           setPlanB({
@@ -352,9 +377,10 @@ export default function HomePage() {
     };
   }, [kakaoPollEnabled, hasAdvanced, showResult, selectedPlace, lang]);
 
-  // 트로피/깃발 알림·confetti·로컬 카운트: 카카오(고급) 점수 기준, 식당당 1회
+  // 트로피/깃발 알림·confetti·로컬 카운트: 고급 점수 기준, 식당당 1회
   useEffect(() => {
     if (!hasAdvanced || !kakaoData || !selectedPlace) return;
+    if (kakaoData.status === "error") return;
     const ks = Number(kakaoData.realScore);
     if (Number.isNaN(ks) || ks < 3.5) return;
 
@@ -499,10 +525,15 @@ export default function HomePage() {
           alternative_query: data.alternative_query ?? null,
         });
 
-        // 💡 2. 고급(카카오) 데이터: 첫 응답에 있으면 바로, 없으면 백그라운드 완료까지 폴링
-        if (data.has_advanced && data.kakao_data) {
+        // 💡 2. 고급 심층 데이터: 즉시·오류·성공 또는 백그라운드 폴링
+        const kd = data.kakao_data as Record<string, unknown> | undefined;
+        if (kd?.status === "error") {
+          setKakaoData(kd);
           setHasAdvanced(true);
-          setKakaoData(data.kakao_data);
+          setKakaoPollEnabled(false);
+        } else if (data.has_advanced && kd) {
+          setHasAdvanced(true);
+          setKakaoData(kd);
           setKakaoPollEnabled(false);
         } else {
           setHasAdvanced(false);
@@ -666,7 +697,8 @@ export default function HomePage() {
 
                     {isAdvancedView &&
                       kakaoData &&
-                      (Number(kakaoData.realScore) >= 3.5) && (
+                      kakaoData.status !== "error" &&
+                      Number(kakaoData.realScore) >= 3.5 && (
                         <div
                           className={`mb-4 flex w-full items-center justify-center gap-2.5 rounded-2xl border px-4 py-3.5 text-center text-sm font-bold leading-snug shadow-md animate-in slide-in-from-top duration-700 ${
                             Number(kakaoData.realScore) >= 4.0
@@ -696,18 +728,54 @@ export default function HomePage() {
                   </header>
 
                   <section className="space-y-6">
-                    <div className={`rounded-2xl border px-4 py-4 text-sm ${isCritical ? 'bg-blue-950/30 border-blue-900/50 text-slate-300' : 'bg-blue-50/50 border-blue-100 text-slate-700'}`}>
-                      <p className={`mb-2 text-xs font-bold flex items-center gap-1 ${isCritical ? 'text-blue-400' : 'text-blue-600'}`}>
-                        <span>{isAdvancedView ? "🔥" : "🤖"}</span> 
-                        {isAdvancedView ? "카카오 심층 팩트 체크" : translations[lang].aiSummaryTitle}
-                      </p>
-                      {/* 💡 whitespace-pre-wrap 추가: 엔터(줄바꿈) 예쁘게 렌더링되게! */}
-                      <p className="leading-relaxed whitespace-pre-wrap transition-all duration-500">
-                        {aiSummary}
-                      </p>
-                    </div>
+                    {isAdvancedView && kakaoData?.status === "error" ? (
+                      <div
+                        className={`rounded-2xl border px-4 py-4 text-sm ${
+                          isCritical
+                            ? "border-amber-800/70 bg-amber-950/30 text-amber-100"
+                            : "border-amber-200 bg-amber-50 text-amber-950"
+                        }`}
+                        role="alert"
+                      >
+                        <p className="mb-2 text-xs font-bold flex items-start gap-2">
+                          <span className="text-lg leading-none shrink-0" aria-hidden>
+                            ⚠️
+                          </span>
+                          <span>{translations[lang].advancedAnalyzeFailedTitle}</span>
+                        </p>
+                        <p className="leading-relaxed pl-[1.75rem] text-sm whitespace-pre-wrap break-keep">
+                          {maskBackendReason(
+                            typeof kakaoData.reason === "string"
+                              ? kakaoData.reason
+                              : "",
+                          )}
+                        </p>
+                      </div>
+                    ) : (
+                      <div
+                        className={`rounded-2xl border px-4 py-4 text-sm ${
+                          isCritical
+                            ? "bg-blue-950/30 border-blue-900/50 text-slate-300"
+                            : "bg-blue-50/50 border-blue-100 text-slate-700"
+                        }`}
+                      >
+                        <p
+                          className={`mb-2 text-xs font-bold flex items-center gap-1 ${isCritical ? "text-blue-400" : "text-blue-600"}`}
+                        >
+                          <span>{isAdvancedView ? "🔥" : "🤖"}</span>
+                          {isAdvancedView
+                            ? translations[lang].advancedDeepFactTitle
+                            : translations[lang].aiSummaryTitle}
+                        </p>
+                        <p className="leading-relaxed whitespace-pre-wrap transition-all duration-500">
+                          {aiSummary}
+                        </p>
+                      </div>
+                    )}
 
-                    {isAdvancedView && chartDetails && (
+                    {isAdvancedView &&
+                      chartDetails &&
+                      kakaoData?.status !== "error" && (
                       <div>
                         <h3 className={`text-sm font-bold mb-3 ${isCritical ? 'text-slate-200' : 'text-slate-800'}`}>
                           {translations[lang].detailsTitle}
@@ -749,6 +817,29 @@ export default function HomePage() {
                         </div>
                       </div>
                     )}
+
+                    {isAdvancedView &&
+                      kakaoData?.status !== "error" &&
+                      (String(kakaoData?.kakao_matched_name ?? "").trim() !== "" ||
+                        String(kakaoData?.kakao_matched_address ?? "").trim() !==
+                          "") && (
+                      <p
+                        className="text-[11px] leading-snug text-slate-500"
+                      >
+                        <span aria-hidden>🔍</span>{" "}
+                        <span>{translations[lang].matchVerificationCaption}</span>{" "}
+                        {(() => {
+                          const mn = String(
+                            kakaoData?.kakao_matched_name ?? "",
+                          ).trim();
+                          const ma = String(
+                            kakaoData?.kakao_matched_address ?? "",
+                          ).trim();
+                          if (mn && ma) return `${mn} (${ma})`;
+                          return mn || ma;
+                        })()}
+                      </p>
+                    )}
                   </section>
 
                   {/* 💡 고급 검색 토글 & 다시 검색 버튼 영역 */}
@@ -759,6 +850,10 @@ export default function HomePage() {
                       <button
                         type="button"
                         onClick={() => {
+                          if (kakaoData?.status === "error") {
+                            setIsAdvancedView(true);
+                            return;
+                          }
                           setRealScore(kakaoData.realScore ?? 0);
                           setEventProb(kakaoData.eventProbability ?? 0);
                           setAiSummary(kakaoData.aiSummary ?? "");
