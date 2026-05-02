@@ -14,7 +14,7 @@ import certifi
 from openai import OpenAI
 import threading
 import random
-from kakao_scraper import get_kakao_place_id, get_deep_kakao_reviews 
+from kakao_scraper import diagnose_kakao_place_match, get_deep_kakao_reviews
 from review_quality import filter_useful_reviews, get_review_text
 
 load_dotenv()
@@ -610,6 +610,14 @@ def sanitize_ai_result(data: dict, mode: str) -> dict:
 
     out["confidenceReason"] = _str_safe(out.get("confidenceReason")).strip()
 
+    if mode == "fast":
+        sm = _str_safe(out.get("scoreMeaning")).strip()
+        if sm != "review_risk_screening":
+            out["scoreMeaning"] = "review_risk_screening"
+        # TODO(frontend): 기본(fast) `realScore`를 맛집·음질 점수처럼 크게 노출하지 말 것.
+        # - `scoreMeaning === "review_risk_screening"`일 때는 '구글 스니펫 기반 1차 리스크 참고' 카피를 권장.
+        # - 맛집 판정 UI는 고급(Kakao 심층) 결과 위주로 설계.
+
     for k in ("sourceStats", "reviewPatternStats", "reviewerSignals"):
         v = out.get(k)
         out[k] = v if isinstance(v, dict) else {}
@@ -717,6 +725,10 @@ def get_fast_prompt(lang, place_info):
             "Output JSON only—see rules below."
         )
         guidelines = f"""
+        [Score meaning — CRITICAL]
+        - **realScore is NOT a 'restaurant quality / 맛집' score.** It is a conservative **reference risk signal from sparse Google-snippet reviews only**.
+        - You MUST include **scoreMeaning** exactly as the string `"review_risk_screening"` (do not rename or localize this key's value).
+
         {_HALLUCINATION_RULE_EN}
         {_TASTE_VALUE_NEUTRAL_EN}
         {_EVENT_PROB_RULE_EN}
@@ -731,7 +743,7 @@ def get_fast_prompt(lang, place_info):
         Details keys: taste, value, service, time, hygiene — all numeric JSON floats only.
         """
         json_format = (
-            '{ "translatedName": "", "realScore": 2.5, "eventProbability": 0, '
+            '{ "translatedName": "", "realScore": 2.5, "scoreMeaning": "review_risk_screening", "eventProbability": 0, '
             '"aiSummary": "", '
             '"details": { "taste": 2.75, "value": 2.75, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }'
         )
@@ -741,6 +753,10 @@ def get_fast_prompt(lang, place_info):
             "아래 규칙을 따르고 출력은 오직 JSON이다."
         )
         guidelines = f"""
+        [점수 의미 — 필수]
+        - **realScore는 '맛집 점수'가 아니다.** 구글 스니펫에 노출된 짧은 리뷰만으로 본 **1차 리스크·참고 신호**다.
+        - **scoreMeaning** 키를 반드시 포함하고 값은 정확히 `"review_risk_screening"` 문자열로만 출력한다(번역·다른 문자열 금지).
+
         {_HALLUCINATION_RULE_KO}
         {_TASTE_VALUE_NEUTRAL_KO}
         {_EVENT_PROB_RULE_KO}
@@ -753,7 +769,7 @@ def get_fast_prompt(lang, place_info):
         3) 닉네임 금지.
         """
         json_format = (
-            '{ "translatedName": "", "realScore": 2.5, "eventProbability": 0, '
+            '{ "translatedName": "", "realScore": 2.5, "scoreMeaning": "review_risk_screening", "eventProbability": 0, '
             '"aiSummary": "", '
             '"details": { "taste": 2.75, "value": 2.75, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }'
         )
@@ -842,6 +858,12 @@ def get_deep_prompt(
         2) kakaoAverageRating / kakaoTotalReviewCount are signals, not truth; never override review evidence.
         3) reviewerSignals and reviewPatternStats are anonymized signals only; do NOT claim manipulation, do NOT name any reviewer.
 
+        [Score calibration — deep analysis ONLY]
+        - Average platform rating plus usefulReviewCount calibrates baseline expectations—they are NOT ground truth—but with enough reviews they should anchor plausible realScore bands.
+        - If usefulReviewCount >= 10, kakaoAverageRating >= 4.0, there are NO critical riskFlags (hygiene, hostility, spoiled food themes), AND review sentiment is broadly positive → realScore should normally be ≥ 3.5.
+        - If usefulReviewCount >= 20 AND kakaoAverageRating >= 4.0, do NOT assign realScore in the 2.x range unless review text provides strong, specific negative evidence.
+        - If reviews clearly document hygiene failures, severe rudeness, spoiled food, or repeated quality complaints, those review-text reasons OVERRIDE the calibration bullets above.
+
         [Data-confidence tone control]
         - dataConfidence == "low": avoid strong recommendations. Use careful hedging ("With limited data...", "Some reviewers report...").
         - dataConfidence == "medium": normal analysis, still avoid overconfidence.
@@ -887,6 +909,12 @@ def get_deep_prompt(
         1) 리뷰 본문 근거가 가장 중요하다.
         2) kakaoAverageRating/kakaoTotalReviewCount는 참고 신호이며, 리뷰 근거와 충돌하면 리뷰 근거를 우선한다.
         3) reviewerSignals/reviewPatternStats는 익명 집계 신호일 뿐이며 조작을 단정하지 마라.
+
+        [점수 보정(score calibration) — 고급(심층) 분석 전용]
+        - 평균 평점(kakaoAverageRating)과 usefulReviewCount는 **진실이 아니라 참고 신호**다. 다만 usefulReviewCount가 충분하면 **기준선(밴드) 보정**에 사용할 수 있다.
+        - usefulReviewCount ≥ 10, kakaoAverageRating ≥ 4.0, 위생·불친절·상한음식 등 **치명적 riskFlags가 없고** 리뷰 본문이 **대체로 긍정**이면 realScore는 보통 **3.5 이상**이 되도록 보정해라.
+        - usefulReviewCount ≥ 20 이고 kakaoAverageRating ≥ 4.0이면 **아주 강한 부정 근거**가 리뷰 본문에 없는 한 **2점대 realScore를 부여하지 마라.**
+        - **위생/불친절/상한 음식/반복적 품질 불만**이 본문에 명확하면 위 보정 규칙보다 **항상 리뷰 텍스트 근거를 우선**한다.
 
         [dataConfidence 톤 조절]
         - low: 강한 추천 금지. "제한된 리뷰 기준", "일부 리뷰 기준", "아직 단정하기 어렵지만" 등 조심스러운 표현만.
@@ -1440,20 +1468,36 @@ def run_kakao_advanced_analysis(
         kakao_query = ""
         place_id = None
         kakao_match: dict | None = None
+        attempted_queries_debug: list[dict] = []
         try:
             for label, kq, kw_log in search_plans:
                 print(
                     f"카카오 검색 시도: {label} [동+추출키워드: {kw_log}] | 전체쿼리: {kq}"
                 )
-                kakao_match = get_kakao_place_id(kq, address)
-                if kakao_match:
-                    place_id = kakao_match.get("place_id")
+                diag = diagnose_kakao_place_match(kq, address)
+                attempted_queries_debug.append(
+                    {
+                        "phase": label,
+                        "query": kq,
+                        "logHint": kw_log,
+                        "matched": bool(diag.get("matched")),
+                        "reject_reason": diag.get("reject_reason"),
+                        "candidatesPreview": (diag.get("candidates") or [])[:5],
+                    }
+                )
+                if diag.get("matched"):
+                    kakao_match = {
+                        "place_id": diag.get("place_id"),
+                        "matched_name": diag.get("matched_name") or "",
+                        "matched_address": diag.get("matched_address") or "",
+                    }
+                    place_id = diag.get("place_id")
                     kakao_query = kq
                     print(
                         f"✅ {label} 검색·주소교차로 place_id 확보 (이후 리뷰·분석에 사용)"
                     )
                     break
-                print(f"   … {label} API 결과 없음·다음 전략")
+                print(f"   … {label} 매칭 실패(`{diag.get('reject_reason')}`)·다음 전략")
 
             if not place_id or not kakao_match:
                 print(
@@ -1467,6 +1511,10 @@ def run_kakao_advanced_analysis(
                                 f"kakao_result_{lang}": {
                                     "status": "error",
                                     "reason": "카카오맵에서 주소가 일치하는 식당을 찾지 못했습니다.",
+                                    "attemptedQueries": attempted_queries_debug,
+                                    "cleanName": name_clean,
+                                    "address": address,
+                                    "debug_reason": "kakao_place_match_failed_after_all_phases",
                                 }
                             }
                         },
@@ -1524,11 +1572,16 @@ def run_kakao_advanced_analysis(
             )
             server_reviewer_signals = scraper_reviewer_signals or {}
 
-            if useful_cnt < 5:
-                # GPT 호출 금지 + DB 저장
+            if useful_cnt < 5 or len(raw_reviews) == 0:
+                # GPT 호출 금지 + DB 저장 — 리뷰 li 미수집·후기 미제공·fallback 제거 후 raw=[] 인 경우 포함
+                ins_msg = (
+                    "카카오 장소 페이지에서 참고 가능한 후기 텍스트를 수집하지 못했습니다(후기 미제공·UI 변경 가능)."
+                    if len(raw_reviews) == 0
+                    else "실질적으로 참고할 만한 카카오 리뷰가 5개 미만이라 고급 분석을 제공하기 어렵습니다."
+                )
                 payload = {
                     "status": "insufficient_reviews",
-                    "reason": "실질적으로 참고할 만한 카카오 리뷰가 5개 미만이라 고급 분석을 제공하기 어렵습니다.",
+                    "reason": ins_msg,
                     "sourceStats": server_source_stats,
                     "reviewPatternStats": server_review_pattern_stats,
                     "reviewerSignals": server_reviewer_signals,
@@ -1625,9 +1678,15 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
             
             if realtime_cache_key in cached_item and cached_item[realtime_cache_key]:
                 cache_date = datetime.strptime(cached_item["date"], "%Y-%m-%d")
+                # Mongo 캐시는 result_{lang}·date 기준 최대 30일 재사용한다.
+                # 로컬/스테이징에서 리뷰 수집·매칭·프롬프트 변경을 반영하려면:
+                #   - 해당 문서에서 result_{lang}, kakao_result_{lang}, map_flag, date 필드를 지우거나
+                #   - seed.py --force 등으로 재분석하라.
                 if datetime.now() - cache_date < timedelta(days=30):
                     result_data = cached_item[realtime_cache_key]
                     result_data["isNewDiscovery"] = False 
+                    if result_data.get("scoreMeaning") != "review_risk_screening":
+                        result_data["scoreMeaning"] = "review_risk_screening"
                     
                     if kakao_cache_key in cached_item:
                         kd_cached = cached_item[kakao_cache_key]
@@ -1638,8 +1697,8 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
                             if isinstance(kd_cached, dict)
                             else None
                         )
-                        # ok 일 때만 has_advanced=True
-                        result_data["has_advanced"] = status == "ok"
+                        # 프론트 폴링 중단·kakao_data 표시: 심층 성공(ok) 또는 리뷰 부족(insufficient_reviews)
+                        result_data["has_advanced"] = status in ("ok", "insufficient_reviews")
                     else:
                         result_data["has_advanced"] = False
                         collection.update_one({"name": query}, {"$set": {kakao_cache_key: {"status": "processing"}}}, upsert=True)

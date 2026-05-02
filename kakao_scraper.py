@@ -56,29 +56,60 @@ def _doc_rank_key(google_address: str, doc: dict, name_query: str) -> tuple:
 _MIN_COMBINED_MATCH_SCORE = 1
 
 
-def get_kakao_place_id(
-    place_name: str, google_address: str,
-) -> dict | None:
-    """
-    키워드 검색 후, 구글 주소와 토큰·상호로 최적 후보를 고른다.
-    overlap + name_bonus 합(score)가 기준 미만이면 매칭 실패(None).
+def _summarize_keyword_docs_for_debug(docs: list, google_address: str, name_query: str, limit: int = 10) -> list[dict]:
+    rows: list[dict] = []
+    for d in docs or []:
+        if not isinstance(d, dict):
+            continue
+        rk = _doc_rank_key(google_address, d, name_query)
+        ov, nb = rk[0], rk[1]
+        rows.append(
+            {
+                "place_name": (d.get("place_name") or "").strip(),
+                "address_name": (d.get("address_name") or "").strip(),
+                "road_address_name": (d.get("road_address_name") or "").strip(),
+                "overlap": int(ov),
+                "name_bonus": int(nb),
+                "combined_score": int(ov + nb),
+            }
+        )
+    rows.sort(key=lambda x: (-x["combined_score"], -x["overlap"], -x["name_bonus"]))
+    return rows[:limit]
 
-    성공 시:
-        {\"place_id\": str, \"matched_name\": str, \"matched_address\": str}
+
+def diagnose_kakao_place_match(place_name: str, google_address: str) -> dict:
     """
+    키워드 검색 1회에 대한 진단 결과(매칭 여부 + 상위 후보별 overlap/name_bonus/combined_score).
+    매칭 로직은 get_kakao_place_id와 동일하게 유지한다.
+    """
+    empty = {
+        "matched": False,
+        "place_id": None,
+        "matched_name": None,
+        "matched_address": None,
+        "reject_reason": None,
+        "candidates": [],
+    }
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
     try:
-        res = requests.get(
-            url, headers=headers, params={"query": place_name, "size": 15}
-        )
-        if res.status_code != 200 or not res.json().get("documents"):
-            return None
+        res = requests.get(url, headers=headers, params={"query": place_name, "size": 15})
+        payload = {}
+        try:
+            payload = res.json() if res.text else {}
+        except Exception:
+            payload = {}
 
-        docs = res.json()["documents"]
+        if res.status_code != 200:
+            return {**empty, "reject_reason": f"keyword_api_http_{res.status_code}"}
+
+        docs = payload.get("documents") or []
+        if not docs:
+            return {**empty, "reject_reason": "empty_documents"}
 
         ga = str(google_address or "").strip()
         google_has_anchor = bool(_addr_tokens(google_address))
+        preview = _summarize_keyword_docs_for_debug(docs, google_address, place_name, 10)
 
         best_doc = max(docs, key=lambda d: _doc_rank_key(google_address, d, place_name))
         rk = _doc_rank_key(google_address, best_doc, place_name)
@@ -94,30 +125,32 @@ def get_kakao_place_id(
             f"후보(겹침 {overlap}·상호보너스 {name_bonus}·합산 {score}) {pname} / {a1 or a2}"
         )
 
-        # 구글 주소가 있어도 토큰이 비면, 이름 보너스만으로는 첫 줄 강매 방지 가능
         if ga and google_has_anchor and score <= 0:
-            print(
-                f"   🚫 [카카오] 매칭 거부: 합산 점수 {score} ≤ 0 (주소 앵커 있음)"
-            )
-            return None
+            print(f"   🚫 [카카오] 매칭 거부: 합산 점수 {score} ≤ 0 (주소 앵커 있음)")
+            return {**empty, "reject_reason": "combined_score_lte_0_with_address_anchor", "candidates": preview}
         if ga and google_has_anchor and score < _MIN_COMBINED_MATCH_SCORE:
-            print(
-                f"   🚫 [카카오] 매칭 거부: 합산 점수 {score} < {_MIN_COMBINED_MATCH_SCORE}"
-            )
-            return None
+            print(f"   🚫 [카카오] 매칭 거부: 합산 점수 {score} < {_MIN_COMBINED_MATCH_SCORE}")
+            return {
+                **empty,
+                "reject_reason": "combined_score_below_min_with_address_anchor",
+                "candidates": preview,
+            }
 
-        # 주소 문자열 없음: 상호 문자열 포함(보너스≥2)일 때만 1건 채택; 아니면 실패
         if not ga or not google_has_anchor:
             if name_bonus < 2:
-                print(
-                    "   🚫 [카카오] 매칭 거부: 구글 주소 앵커 없고 상호 문자열 포함 관계 없음"
-                )
-                return None
+                print("   🚫 [카카오] 매칭 거부: 구글 주소 앵커 없고 상호 문자열 포함 관계 없음")
+                return {
+                    **empty,
+                    "reject_reason": "missing_address_anchor_need_name_bonus_2plus",
+                    "candidates": preview,
+                }
             if score < _MIN_COMBINED_MATCH_SCORE:
-                print(
-                    f"   🚫 [카카오] 매칭 거부: 합산 점수 {score} < {_MIN_COMBINED_MATCH_SCORE}"
-                )
-                return None
+                print(f"   🚫 [카카오] 매칭 거부: 합산 점수 {score} < {_MIN_COMBINED_MATCH_SCORE}")
+                return {
+                    **empty,
+                    "reject_reason": "combined_score_below_min_no_anchor",
+                    "candidates": preview,
+                }
 
         if len(docs) > 1 and overlap == 0 and google_has_anchor:
             print(
@@ -125,14 +158,34 @@ def get_kakao_place_id(
             )
 
         return {
+            "matched": True,
             "place_id": best_doc["id"],
             "matched_name": pname,
-            # address_name(지번) 또는 road_address_name(도로명) 중 존재하는 값
             "matched_address": a1 or a2,
+            "reject_reason": None,
+            "candidates": preview,
         }
 
     except Exception as e:
         print(f"🚨 카카오 ID 검색 실패: {e}")
+        return {**empty, "reject_reason": f"keyword_api_exception:{type(e).__name__}"}
+
+
+def get_kakao_place_id(place_name: str, google_address: str) -> dict | None:
+    """
+    키워드 검색 후, 구글 주소와 토큰·상호로 최적 후보를 고른다.
+    overlap + name_bonus 합(score)가 기준 미만이면 매칭 실패(None).
+
+    성공 시:
+        {\"place_id\": str, \"matched_name\": str, \"matched_address\": str}
+    """
+    r = diagnose_kakao_place_match(place_name, google_address)
+    if r.get("matched"):
+        return {
+            "place_id": r["place_id"],
+            "matched_name": r.get("matched_name") or "",
+            "matched_address": r.get("matched_address") or "",
+        }
     return None
 
 
@@ -383,39 +436,13 @@ def get_deep_kakao_reviews(place_id: str, max_reviews: int = 25) -> dict:
                     if len(reviews_out) >= mr:
                         break
             else:
-                # fallback: 정상 리뷰 수집이 실패했을 때만 사용
+                # 리뷰 li 추출 실패 시: 페이지 전체 innerText를 리뷰로 쓰지 않음(GPT 노이즈·가짜 '충분한 리뷰' 방지).
                 fallback_used = True
-                all_text = page.evaluate("() => document.body.innerText")
-                fallback_text = _normalize_review_text((all_text or "")[:5000])
-                if fallback_text:
-                    reviews_out.append(
-                        {
-                            "text": fallback_text,
-                            "date": None,
-                            "rating": None,
-                            "reviewerReviewCount": None,
-                            "reviewerAverageRating": None,
-                        }
-                    )
 
         except Exception as e:
             print(f"🚨 [카카오 크롤러] 에러: {e}")
             fallback_used = True
-            try:
-                all_text = page.evaluate("() => document.body.innerText")
-                fallback_text = _normalize_review_text((all_text or "")[:5000])
-                if fallback_text:
-                    reviews_out = [
-                        {
-                            "text": fallback_text,
-                            "date": None,
-                            "rating": None,
-                            "reviewerReviewCount": None,
-                            "reviewerAverageRating": None,
-                        }
-                    ]
-            except Exception:
-                reviews_out = []
+            reviews_out = []
         finally:
             browser.close()
 

@@ -273,8 +273,20 @@ def main() -> None:
     parser.add_argument("--langs", default="ko,en", help="comma-separated: ko,en")
     parser.add_argument("--limit", type=int, default=0, help="0 means no limit")
     parser.add_argument("--dry-run", action="store_true", help="no DB writes, no OpenAI calls")
-    parser.add_argument("--force", action="store_true", help="recompute even if recent cache exists")
-    parser.add_argument("--stale-days", type=int, default=30, help="cache freshness window in days")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "recompute Kakao/advanced even when DB cache looks fresh (/api/analyze와 동일하게 "
+            "result_*/date/kakao_result_* 등이 최대 stale-days 동안 재사용될 수 있음)"
+        ),
+    )
+    parser.add_argument(
+        "--stale-days",
+        type=int,
+        default=30,
+        help="cache freshness window in days (/api/analyze 캐시 TTL과 같은 개념으로 보면 됨)",
+    )
     parser.add_argument("--sleep", type=float, default=0.5, help="sleep seconds between places")
     args = parser.parse_args()
 

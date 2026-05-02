@@ -85,6 +85,14 @@ def sanitize_ai_result(data: dict, mode: str) -> dict:
     out["dataConfidence"] = dc
     out["confidenceReason"] = _str_safe(out.get("confidenceReason")).strip()
 
+    if mode == "fast":
+        sm = _str_safe(out.get("scoreMeaning")).strip()
+        if sm != "review_risk_screening":
+            out["scoreMeaning"] = "review_risk_screening"
+        # TODO(frontend): 기본(fast) `realScore`를 맛집·음질 점수처럼 크게 노출하지 말 것.
+        # - `scoreMeaning === "review_risk_screening"`일 때는 '구글 스니펫 기반 1차 리스크 참고' 카피를 권장.
+        # - 맛집 판정 UI는 고급(Kakao 심층) 결과 위주로 설계.
+
     for k in ("sourceStats", "reviewPatternStats", "reviewerSignals"):
         v = out.get(k)
         out[k] = v if isinstance(v, dict) else {}

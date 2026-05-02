@@ -38,6 +38,10 @@ class TestSanitize(unittest.TestCase):
             self.assertIsInstance(out["practicalInfo"][k], str)
             self.assertTrue(out["practicalInfo"][k])
 
+    def test_fast_score_meaning_normalized(self):
+        out = sanitize_ai_result({"scoreMeaning": "wrong"}, "fast")
+        self.assertEqual(out["scoreMeaning"], "review_risk_screening")
+
 
 if __name__ == "__main__":
     unittest.main()
