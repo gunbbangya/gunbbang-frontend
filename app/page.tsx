@@ -69,8 +69,16 @@ const translations: Record<
     planBFootnote: string;
     planBComingSoon: string;
     advancedDeepFactTitle: string;
-    matchVerificationCaption: string;
     advancedAnalyzeFailedTitle: string;
+    kakaoSourceSearchPlace: string;
+    kakaoSourceReviewOrigin: string;
+    kakaoSourceAddress: string;
+    kakaoSourceKakaoRating: string;
+    kakaoSourceKakaoTotalReviews: string;
+    kakaoSourceReviewsAnalyzed: string;
+    kakaoSourceReviewsUsed: string;
+    kakaoSourceStatUnavailable: string;
+    kakaoSourceFallbackUnstable: string;
   }
 > = {
   ko: {
@@ -136,8 +144,17 @@ const translations: Record<
     planBFootnote: "실제 근처 검색·DB 연동은 곧 이 버튼에 연결될 예정입니다.",
     planBComingSoon: "준비 중입니다. 다음 업데이트에서 만나요!",
     advancedDeepFactTitle: "현지 로컬 DB 심층 팩트 체크",
-    matchVerificationCaption: "현지 로컬 DB 검증 기준:",
     advancedAnalyzeFailedTitle: "심층 분석을 완료할 수 없습니다",
+    kakaoSourceSearchPlace: "검색 가게",
+    kakaoSourceReviewOrigin: "리뷰 출처",
+    kakaoSourceAddress: "주소",
+    kakaoSourceKakaoRating: "카카오 평점",
+    kakaoSourceKakaoTotalReviews: "카카오 전체 리뷰 수",
+    kakaoSourceReviewsAnalyzed: "분석 리뷰",
+    kakaoSourceReviewsUsed: "사용 리뷰",
+    kakaoSourceStatUnavailable: "확인 불가",
+    kakaoSourceFallbackUnstable:
+      "후기(li) 단위 수집이 불안정했을 수 있어요. 점수·요약 해석 시 참고해 주세요.",
   },
   en: {
     loadingMessages: [
@@ -202,8 +219,17 @@ const translations: Record<
     planBFootnote: "Nearby verified search will plug into this button in a future update.",
     planBComingSoon: "Coming soon in a future release.",
     advancedDeepFactTitle: "Deep fact check (local review DB)",
-    matchVerificationCaption: "Local DB verification basis:",
     advancedAnalyzeFailedTitle: "Advanced analysis unavailable",
+    kakaoSourceSearchPlace: "Matched place",
+    kakaoSourceReviewOrigin: "Review source",
+    kakaoSourceAddress: "Address",
+    kakaoSourceKakaoRating: "Kakao average rating",
+    kakaoSourceKakaoTotalReviews: "Kakao total reviews (shown on page)",
+    kakaoSourceReviewsAnalyzed: "Reviews analyzed",
+    kakaoSourceReviewsUsed: "Reviews fed to model",
+    kakaoSourceStatUnavailable: "Unavailable",
+    kakaoSourceFallbackUnstable:
+      "Review list capture may have been unstable (fallback). Interpret scores/summary cautiously.",
   },
 };
 
@@ -214,6 +240,20 @@ function maskBackendReason(reason: unknown): string {
   if (!s.trim()) return "";
   s = s.replace(/카카오맵/g, "로컬 데이터").replace(/카카오/g, "현지 리뷰");
   return s;
+}
+
+function formatKakaoSourceNumber(v: unknown): string | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : Number(v);
+  if (Number.isFinite(n)) return String(n);
+  return null;
+}
+
+function formatKakaoSourceRating(v: unknown, unavailable: string): string {
+  if (v === null || v === undefined || v === "") return unavailable;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return unavailable;
+  return n.toFixed(1);
 }
 
 /** 고급 분석 트로피/깃발 알림을 React Strict Mode 이중 effect에서도 1회만 (같은 식당+세션) */
@@ -774,6 +814,144 @@ export default function HomePage() {
                     )}
 
                     {isAdvancedView &&
+                      kakaoData?.status !== "error" &&
+                      String(kakaoData?.kakao_matched_name ?? "").trim() !==
+                        "" && (
+                        <div
+                          className={`rounded-xl border px-3 py-2.5 text-[11px] leading-relaxed ${
+                            isCritical
+                              ? "border-slate-600 bg-slate-800/50 text-slate-300"
+                              : "border-slate-200 bg-slate-50 text-slate-600"
+                          }`}
+                        >
+                          <p
+                            className={`text-[10px] font-semibold uppercase tracking-wide ${
+                              isCritical ? "text-slate-400" : "text-slate-500"
+                            }`}
+                          >
+                            {translations[lang].kakaoSourceSearchPlace}
+                          </p>
+                          <p className="mt-1.5 break-words">
+                            <span
+                              className={
+                                isCritical ? "text-slate-400" : "text-slate-500"
+                              }
+                            >
+                              {translations[lang].kakaoSourceReviewOrigin}:
+                            </span>{" "}
+                            <span
+                              className={`font-medium ${isCritical ? "text-slate-100" : "text-slate-800"}`}
+                            >
+                              {String(kakaoData.kakao_matched_name ?? "").trim()}
+                            </span>
+                          </p>
+                          {String(kakaoData.kakao_matched_address ?? "").trim() !==
+                            "" && (
+                            <p className="mt-0.5 break-words">
+                              <span
+                                className={
+                                  isCritical ? "text-slate-400" : "text-slate-500"
+                                }
+                              >
+                                {translations[lang].kakaoSourceAddress}:
+                              </span>{" "}
+                              <span
+                                className={`font-medium ${isCritical ? "text-slate-100" : "text-slate-800"}`}
+                              >
+                                {String(kakaoData.kakao_matched_address ?? "").trim()}
+                              </span>
+                            </p>
+                          )}
+                          {kakaoData.sourceStats &&
+                            typeof kakaoData.sourceStats === "object" &&
+                            !Array.isArray(kakaoData.sourceStats) && (
+                              <dl
+                                className={`mt-2 space-y-1 border-t pt-2 ${
+                                  isCritical ? "border-slate-600" : "border-slate-200"
+                                }`}
+                              >
+                                <div className="flex flex-wrap gap-x-1">
+                                  <dt
+                                    className={
+                                      isCritical ? "text-slate-400" : "text-slate-500"
+                                    }
+                                  >
+                                    {translations[lang].kakaoSourceKakaoRating}:
+                                  </dt>
+                                  <dd>
+                                    {formatKakaoSourceRating(
+                                      kakaoData.sourceStats.kakaoAverageRating,
+                                      translations[lang].kakaoSourceStatUnavailable,
+                                    )}
+                                  </dd>
+                                </div>
+                                <div className="flex flex-wrap gap-x-1">
+                                  <dt
+                                    className={
+                                      isCritical ? "text-slate-400" : "text-slate-500"
+                                    }
+                                  >
+                                    {translations[lang].kakaoSourceKakaoTotalReviews}:
+                                  </dt>
+                                  <dd>
+                                    {formatKakaoSourceNumber(
+                                      kakaoData.sourceStats.kakaoTotalReviewCount,
+                                    ) ?? translations[lang].kakaoSourceStatUnavailable}
+                                  </dd>
+                                </div>
+                                <div className="flex flex-wrap gap-x-1">
+                                  <dt
+                                    className={
+                                      isCritical ? "text-slate-400" : "text-slate-500"
+                                    }
+                                  >
+                                    {translations[lang].kakaoSourceReviewsAnalyzed}:
+                                  </dt>
+                                  <dd>
+                                    {(() => {
+                                      const u = formatKakaoSourceNumber(
+                                        kakaoData.sourceStats.usefulReviewCount,
+                                      );
+                                      const r = formatKakaoSourceNumber(
+                                        kakaoData.sourceStats.rawReviewCount,
+                                      );
+                                      return u !== null && r !== null
+                                        ? `${u} / ${r}`
+                                        : translations[lang].kakaoSourceStatUnavailable;
+                                    })()}
+                                  </dd>
+                                </div>
+                                <div className="flex flex-wrap gap-x-1">
+                                  <dt
+                                    className={
+                                      isCritical ? "text-slate-400" : "text-slate-500"
+                                    }
+                                  >
+                                    {translations[lang].kakaoSourceReviewsUsed}:
+                                  </dt>
+                                  <dd>
+                                    {formatKakaoSourceNumber(
+                                      kakaoData.sourceStats.usedReviewCount,
+                                    ) ?? translations[lang].kakaoSourceStatUnavailable}
+                                  </dd>
+                                </div>
+                              </dl>
+                            )}
+                          {kakaoData.sourceStats?.fallbackUsed === true && (
+                            <p
+                              className={`mt-2 text-[10px] leading-snug ${
+                                isCritical
+                                  ? "text-amber-200/95"
+                                  : "text-amber-800"
+                              }`}
+                            >
+                              ⚠️ {translations[lang].kakaoSourceFallbackUnstable}
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                    {isAdvancedView &&
                       chartDetails &&
                       kakaoData?.status !== "error" && (
                       <div>
@@ -816,29 +994,6 @@ export default function HomePage() {
 
                         </div>
                       </div>
-                    )}
-
-                    {isAdvancedView &&
-                      kakaoData?.status !== "error" &&
-                      (String(kakaoData?.kakao_matched_name ?? "").trim() !== "" ||
-                        String(kakaoData?.kakao_matched_address ?? "").trim() !==
-                          "") && (
-                      <p
-                        className="text-[11px] leading-snug text-slate-500"
-                      >
-                        <span aria-hidden>🔍</span>{" "}
-                        <span>{translations[lang].matchVerificationCaption}</span>{" "}
-                        {(() => {
-                          const mn = String(
-                            kakaoData?.kakao_matched_name ?? "",
-                          ).trim();
-                          const ma = String(
-                            kakaoData?.kakao_matched_address ?? "",
-                          ).trim();
-                          if (mn && ma) return `${mn} (${ma})`;
-                          return mn || ma;
-                        })()}
-                      </p>
                     )}
                   </section>
 

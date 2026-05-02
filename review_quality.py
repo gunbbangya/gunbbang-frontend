@@ -203,15 +203,46 @@ _PROMO_KEYWORDS = [
 ]
 
 
+# 날짜·UI 메타 숫자(구체적인 방문 후기 정보로 보지 않음)
+_SPURIOUS_NUM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b\d{4}\.\d{2}\.\d{2}\.?\b"),
+    re.compile(r"\b(?:리뷰|후기)\s*[0-9,]+\s*개\b"),
+    re.compile(r"\b별점\s*[0-9]+(?:\.[0-9]+)?\b"),
+    re.compile(r"\b평균\s*[0-9]+(?:\.[0-9]+)?\b"),
+    re.compile(r"\b작성자\s*평균\s*[0-9]+(?:\.[0-9]+)?\b"),
+)
+
+# 숫자 + 식별 가능한 단위(가격·시간·인원·층·점수 등)만 '구체 신호'로 본다.
+_MEANINGFUL_UNIT_NUMBER = re.compile(
+    r"(?:^|[^\w])(\d[\d,]*(?:\.\d+)?)\s*(?:만원|원|시간|분|명|인분|층|점)\b",
+)
+_MEANINGFUL_HOUR_UNIT = re.compile(r"(?:^|[^\w])(\d[\d,]*(?:\.\d+)?)\s*시\b(?=\s|[,.\?!]|$)")
+
+
+def _strip_spurious_numeric_content(t: str) -> str:
+    s = "" if t is None else str(t)
+    for pat in _SPURIOUS_NUM_PATTERNS:
+        s = pat.sub(" ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _has_meaningful_number_with_unit(t: str) -> bool:
+    if not t:
+        return False
+    return bool(_MEANINGFUL_UNIT_NUMBER.search(t) or _MEANINGFUL_HOUR_UNIT.search(t))
+
+
 def _has_concrete_signal(text: str) -> bool:
     t = normalize_review_text(text)
     if not t:
         return False
-    # 숫자/단위가 있으면 구체성 가능성이 높음
-    if re.search(r"\d", t):
+    t2 = normalize_review_text(_strip_spurious_numeric_content(t))
+    if not t2:
+        return False
+    if _has_meaningful_number_with_unit(t2):
         return True
-    # 키워드 기반(너무 엄격하지 않게)
-    return any(k in t for k in _CONCRETE_KEYWORDS)
+    return any(k in t2 for k in _CONCRETE_KEYWORDS)
 
 
 def _has_promo_signal(text: str) -> bool:
@@ -231,14 +262,24 @@ def is_useful_review(text: str) -> bool:
     if not nt:
         return False
 
-    # 길이 기반(보수적으로)
-    nlen = len(nt)
+    stripped_meta = normalize_review_text(_strip_spurious_numeric_content(nt))
+    if not stripped_meta:
+        stripped_meta = nt
+    substantive_tail = re.sub(r"[0-9,.\s]+", "", stripped_meta)
+
     generic = is_generic_short_review(nt)
     concrete = _has_concrete_signal(nt)
     promo = _has_promo_signal(nt)
 
     if generic and not concrete:
         return False
+
+    # 날짜·UI 숫자 제외 후 본문이 숫자/기호 뭉치뿐이면 useful 아님
+    if stripped_meta.strip() and not re.search(r"[a-z가-힣]", substantive_tail) and not concrete:
+        return False
+
+    # 길이 기준은 메타 제거 문자열 길이(날짜로만 길어 보이는 경우 완화)
+    nlen = len(stripped_meta)
 
     # 짧지만 구체 신호가 없으면 drop
     if nlen < 18 and not concrete:

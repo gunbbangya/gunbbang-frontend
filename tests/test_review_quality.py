@@ -1,6 +1,6 @@
 import unittest
 
-from review_quality import filter_useful_reviews
+from review_quality import filter_useful_reviews, is_useful_review
 
 
 class TestReviewQuality(unittest.TestCase):
@@ -64,6 +64,14 @@ class TestReviewQuality(unittest.TestCase):
         self.assertEqual(useful.get("rating"), 4.0)
         self.assertEqual(useful.get("reviewerReviewCount"), 50)
         self.assertEqual(useful.get("reviewerAverageRating"), 3.8)
+
+    def test_no_concrete_when_only_standalone_digits(self):
+        self.assertFalse(is_useful_review("999 12 44"))
+        self.assertFalse(is_useful_review("2026.03.03. 555 777"))
+
+    def test_concrete_when_number_with_meaningful_unit(self):
+        self.assertTrue(is_useful_review("웨이팅 40분이라 좀 빡세지만 고기 자체는 괜찮았음"))
+        self.assertTrue(is_useful_review("인당 15000 원 정도예요 적당히 맛있어요 여기가"))
 
 
 if __name__ == "__main__":

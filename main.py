@@ -15,7 +15,7 @@ from openai import OpenAI
 import threading
 import random
 from kakao_scraper import diagnose_kakao_place_match, get_deep_kakao_reviews
-from review_quality import filter_useful_reviews, get_review_text
+from review_quality import filter_useful_reviews, get_review_text, normalize_review_text
 
 load_dotenv()
 
@@ -858,11 +858,23 @@ def get_deep_prompt(
         2) kakaoAverageRating / kakaoTotalReviewCount are signals, not truth; never override review evidence.
         3) reviewerSignals and reviewPatternStats are anonymized signals only; do NOT claim manipulation, do NOT name any reviewer.
 
-        [Score calibration — deep analysis ONLY]
-        - Average platform rating plus usefulReviewCount calibrates baseline expectations—they are NOT ground truth—but with enough reviews they should anchor plausible realScore bands.
-        - If usefulReviewCount >= 10, kakaoAverageRating >= 4.0, there are NO critical riskFlags (hygiene, hostility, spoiled food themes), AND review sentiment is broadly positive → realScore should normally be ≥ 3.5.
-        - If usefulReviewCount >= 20 AND kakaoAverageRating >= 4.0, do NOT assign realScore in the 2.x range unless review text provides strong, specific negative evidence.
-        - If reviews clearly document hygiene failures, severe rudeness, spoiled food, or repeated quality complaints, those review-text reasons OVERRIDE the calibration bullets above.
+        [Score interpretation — deep analysis ONLY]
+        - realScore reflects visit worth grounded in Kakao review text—this is not copying the platform star average.
+        - kakaoAverageRating and usefulReviewCount are confidence/baseline reference signals only.
+        - What matters for the final judgment is what repeats in the reviews: recommended dishes, taste satisfaction, value, service, waits, hygiene, and practical visit cues.
+
+        Guidance for realScore bands (soft guide, not rigid rules):
+        - 4.0–5.0: Multiple substantive reviews strongly repeat praise for specific menu/taste/satisfaction, and no grave recurring risks show up in the text.
+        - 3.5–3.9: Generally safe and worthwhile; positives outweigh negatives though waits/price frustrations may appear—express those via practicalInfo/riskFlags rather than slashing the headline score.
+        - 3.0–3.4: Middling or mixed; some upsides but not enough for a strong recommendation.
+        - 2.5–2.9: Thin evidence, few reviews, or mixed signals that make it hard to judge confidently.
+        - Below 2.5: Reserve for clear, repeated serious issues (hygiene failures, severe hostility, spoiled food, repeated quality complaints) documented in review text.
+
+        Important:
+        - Do NOT deeply cut realScore for long waits, high prices, or parking hassle alone—capture them in practicalInfo and riskFlags instead.
+        - If the platform average is high and usefulReviewCount is solid but you assign a low realScore, you must point to explicit negative evidence in the review text.
+        - If reviews are detailed and broadly positive, reflect that naturally in realScore.
+        - When platform ratings and review narrative conflict, prefer the review narrative.
 
         [Data-confidence tone control]
         - dataConfidence == "low": avoid strong recommendations. Use careful hedging ("With limited data...", "Some reviewers report...").
@@ -910,11 +922,25 @@ def get_deep_prompt(
         2) kakaoAverageRating/kakaoTotalReviewCount는 참고 신호이며, 리뷰 근거와 충돌하면 리뷰 근거를 우선한다.
         3) reviewerSignals/reviewPatternStats는 익명 집계 신호일 뿐이며 조작을 단정하지 마라.
 
-        [점수 보정(score calibration) — 고급(심층) 분석 전용]
-        - 평균 평점(kakaoAverageRating)과 usefulReviewCount는 **진실이 아니라 참고 신호**다. 다만 usefulReviewCount가 충분하면 **기준선(밴드) 보정**에 사용할 수 있다.
-        - usefulReviewCount ≥ 10, kakaoAverageRating ≥ 4.0, 위생·불친절·상한음식 등 **치명적 riskFlags가 없고** 리뷰 본문이 **대체로 긍정**이면 realScore는 보통 **3.5 이상**이 되도록 보정해라.
-        - usefulReviewCount ≥ 20 이고 kakaoAverageRating ≥ 4.0이면 **아주 강한 부정 근거**가 리뷰 본문에 없는 한 **2점대 realScore를 부여하지 마라.**
-        - **위생/불친절/상한 음식/반복적 품질 불만**이 본문에 명확하면 위 보정 규칙보다 **항상 리뷰 텍스트 근거를 우선**한다.
+        [점수 해석 — 고급 분석 전용]
+
+        - realScore는 카카오 리뷰 본문을 중심으로 판단하는 방문 가치 점수다.
+        - 카카오 평균 평점을 기계적으로 복사하지 마라.
+        - kakaoAverageRating과 usefulReviewCount는 신뢰도와 기준선 참고 신호로만 사용한다.
+        - 최종 근거는 반복적으로 나타나는 리뷰 내용이다: 추천 메뉴, 맛 만족도, 가격 대비 만족도, 서비스, 웨이팅, 위생, 방문 실전 정보.
+
+        점수 기준:
+        - 4.0~5.0: 여러 useful 리뷰에서 특정 메뉴/맛/만족도가 반복적으로 강하게 확인되고, 심각한 반복 리스크가 없는 경우.
+        - 3.5~3.9: 전반적으로 안전하고 방문 가치가 있는 경우. 긍정 근거가 부정 근거보다 강하지만 웨이팅/가격 같은 참고사항은 있을 수 있음.
+        - 3.0~3.4: 무난하거나 다소 혼합적인 경우. 장점은 있으나 강한 추천까지는 어려운 경우.
+        - 2.5~2.9: 근거가 약하거나 리뷰가 제한적이거나, 장단점이 섞여 확신하기 어려운 경우.
+        - 2.5 미만: 위생, 심각한 불친절, 상한 음식, 반복적 품질 불만처럼 명확한 심각 문제가 반복될 때만.
+
+        중요:
+        - 긴 웨이팅, 비싼 가격, 주차 불편만으로 점수를 크게 낮추지 말고 practicalInfo/riskFlags로 분리한다.
+        - 카카오 평균 평점이 높고 usefulReviewCount가 충분한데도 낮은 점수를 줄 때는 반드시 리뷰 본문에 그럴 만한 명확한 근거가 있어야 한다.
+        - 리뷰 본문이 세세하고 전반적으로 긍정적이면 realScore에도 자연스럽게 반영한다.
+        - 평점과 리뷰 본문이 충돌하면 리뷰 본문을 우선한다.
 
         [dataConfidence 톤 조절]
         - low: 강한 추천 금지. "제한된 리뷰 기준", "일부 리뷰 기준", "아직 단정하기 어렵지만" 등 조심스러운 표현만.
@@ -1148,8 +1174,12 @@ def compute_reviewer_weight(item: dict) -> float:
     저장·노출은 집계 통계로만 하며, 가중치 범위는 0.8~1.3을 유지한다.
     """
     w = 1.0
-    arc = item.get("author_review_count")
-    aavg = item.get("author_avg_rating")
+    arc = item.get("reviewerReviewCount")
+    if arc is None:
+        arc = item.get("author_review_count")
+    aavg = item.get("reviewerAverageRating")
+    if aavg is None:
+        aavg = item.get("author_avg_rating")
 
     try:
         arc_i = int(arc) if arc is not None else None
@@ -1179,27 +1209,43 @@ def compute_reviewer_weight(item: dict) -> float:
 
 def build_weighted_review_texts(review_items: list[dict], *, target_n: int) -> tuple[list[str], dict]:
     """
-    리뷰어 시그널 기반 가중치로 리뷰 텍스트를 샘플링해 LLM 입력 코퍼스를 만든다.
-    - 개별 리뷰어/식별 정보는 포함하지 않는다.
-    - 한 리뷰어가 결론을 뒤집지 못하도록 가중치는 완만(0.8~1.3) + 평균 1.0로 정규화.
+    리뷰어 시그널 기반 가중치로 리뷰 텍스트를 무중복 선택해 LLM 입력 코퍼스를 만든다.
+    - 텍스트에 리뷰어 메타 필드는 넣지 않는다.
+    - 비복원 추출이라 동일 리뷰 문장이 두 번 포함되지 않는다.
     """
-    items = [it for it in (review_items or []) if isinstance(it, dict) and str(it.get("text") or "").strip()]
-    if not items:
+    uniq: list[dict] = []
+    seen_txt: set[str] = set()
+    for it in review_items or []:
+        if not isinstance(it, dict):
+            continue
+        tx = str(it.get("text") or "").strip()
+        if not tx:
+            continue
+        nk = normalize_review_text(tx)
+        if nk in seen_txt:
+            continue
+        seen_txt.add(nk)
+        uniq.append(it)
+
+    if not uniq:
         return ([], {"weightStats": {"min": None, "max": None, "mean": None}})
 
-    weights = [compute_reviewer_weight(it) for it in items]
+    weights = [compute_reviewer_weight(it) for it in uniq]
     mean_w = sum(weights) / len(weights) if weights else 1.0
     if mean_w <= 0:
         mean_w = 1.0
     norm = [_clamp(w / mean_w, 0.8, 1.3) for w in weights]
 
-    # 샘플링: 원문 리뷰 수가 적으면 그대로, 많으면 가중치에 따라 target_n 만큼 복원추출
-    n = max(1, int(target_n))
-    if n <= len(items):
-        # 가중치가 커도 과도한 영향 방지 위해 "부분 샘플링" (복원추출)
-        sampled = random.choices(items, weights=norm, k=n)
-    else:
-        sampled = random.choices(items, weights=norm, k=n)
+    n_take = min(max(1, int(target_n)), len(uniq))
+    rem: list[dict] = list(uniq)
+    rem_w: list[float] = list(norm)
+    sampled: list[dict] = []
+    for _ in range(n_take):
+        if not rem:
+            break
+        pick_i = random.choices(range(len(rem)), weights=rem_w, k=1)[0]
+        sampled.append(rem.pop(pick_i))
+        rem_w.pop(pick_i)
 
     texts = [str(it.get("text") or "").strip() for it in sampled if str(it.get("text") or "").strip()]
     wstats = {
@@ -1551,9 +1597,17 @@ def run_kakao_advanced_analysis(
             dropped_reviews = filtered.get("dropped_reviews") or []
             raw_cnt = int(filtered.get("rawReviewCount") or len(raw_reviews))
             useful_cnt = int(filtered.get("usefulReviewCount") or len(useful_reviews))
-            used_cnt = min(40, useful_cnt)
-            used_review_objs = list(useful_reviews)[:used_cnt]
-            used_reviews_texts = [get_review_text(r).strip() for r in used_review_objs if get_review_text(r).strip()]
+            target_sel = min(40, useful_cnt)
+            weighted_inputs: list[dict] = []
+            for r in useful_reviews:
+                if isinstance(r, dict):
+                    weighted_inputs.append(r)
+                elif isinstance(r, str) and r.strip():
+                    weighted_inputs.append({"text": r.strip()})
+            used_reviews_texts, _wmeta = build_weighted_review_texts(
+                weighted_inputs,
+                target_n=target_sel,
+            )
 
             data_conf, conf_reason = _server_confidence(useful_cnt)
 
@@ -1563,7 +1617,7 @@ def run_kakao_advanced_analysis(
                 "kakaoTotalReviewCount": scraper_source_stats.get("kakaoTotalReviewCount"),
                 "rawReviewCount": raw_cnt,
                 "usefulReviewCount": useful_cnt,
-                "usedReviewCount": int(len(used_reviews_texts)),
+                "usedReviewCount": len(used_reviews_texts),
                 "collectedReviewCount": scraper_source_stats.get("collectedReviewCount"),
                 "fallbackUsed": scraper_source_stats.get("fallbackUsed"),
             }
@@ -1603,7 +1657,7 @@ def run_kakao_advanced_analysis(
                 review_pattern_stats=server_review_pattern_stats,
                 reviewer_signals=server_reviewer_signals,
                 data_confidence=data_conf,
-                used_review_count=int(len(used_reviews_texts)),
+                used_review_count=len(used_reviews_texts),
             )
             response = client.chat.completions.create(
                 model="gpt-4o-mini", response_format={ "type": "json_object" },
