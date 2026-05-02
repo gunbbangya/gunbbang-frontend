@@ -148,8 +148,8 @@ const translations: Record<
     kakaoSourceSearchPlace: "검색 가게",
     kakaoSourceReviewOrigin: "리뷰 출처",
     kakaoSourceAddress: "주소",
-    kakaoSourceKakaoRating: "카카오 평점",
-    kakaoSourceKakaoTotalReviews: "카카오 전체 리뷰 수",
+    kakaoSourceKakaoRating: "현지 평점",
+    kakaoSourceKakaoTotalReviews: "현지 전체 리뷰 수",
     kakaoSourceReviewsAnalyzed: "분석 리뷰",
     kakaoSourceReviewsUsed: "사용 리뷰",
     kakaoSourceStatUnavailable: "확인 불가",
@@ -223,8 +223,8 @@ const translations: Record<
     kakaoSourceSearchPlace: "Matched place",
     kakaoSourceReviewOrigin: "Review source",
     kakaoSourceAddress: "Address",
-    kakaoSourceKakaoRating: "Kakao average rating",
-    kakaoSourceKakaoTotalReviews: "Kakao total reviews (shown on page)",
+    kakaoSourceKakaoRating: "Local average rating",
+    kakaoSourceKakaoTotalReviews: "Local total reviews",
     kakaoSourceReviewsAnalyzed: "Reviews analyzed",
     kakaoSourceReviewsUsed: "Reviews fed to model",
     kakaoSourceStatUnavailable: "Unavailable",
@@ -234,6 +234,15 @@ const translations: Record<
 };
 
 /** 플랫폼 이름이 섞일 수 있는 백엔드 reason 문자열을 UI 표시용으로 마스킹 */
+/** 심층 분석 불가 또는 리뷰 부족 — 정상 카카오 점수 카드/UI를 숨기고 공통 경고 패널로 처리 */
+function isKakaoDeepFailureStatus(status: unknown): boolean {
+  return (
+    status === "error" ||
+    status === "insufficient_reviews" ||
+    status === "no_data"
+  );
+}
+
 function maskBackendReason(reason: unknown): string {
   let s =
     typeof reason === "string" ? reason : reason != null ? String(reason) : "";
@@ -380,7 +389,7 @@ export default function HomePage() {
         if (response.status === 429 || !response.ok) return;
         const data = await response.json();
         const kd = data.kakao_data;
-        if (kd?.status === "error") {
+        if (isKakaoDeepFailureStatus(kd?.status)) {
           setKakaoData(kd);
           setHasAdvanced(true);
           setKakaoPollEnabled(false);
@@ -420,7 +429,7 @@ export default function HomePage() {
   // 트로피/깃발 알림·confetti·로컬 카운트: 고급 점수 기준, 식당당 1회
   useEffect(() => {
     if (!hasAdvanced || !kakaoData || !selectedPlace) return;
-    if (kakaoData.status === "error") return;
+    if (isKakaoDeepFailureStatus(kakaoData.status)) return;
     const ks = Number(kakaoData.realScore);
     if (Number.isNaN(ks) || ks < 3.5) return;
 
@@ -567,7 +576,7 @@ export default function HomePage() {
 
         // 💡 2. 고급 심층 데이터: 즉시·오류·성공 또는 백그라운드 폴링
         const kd = data.kakao_data as Record<string, unknown> | undefined;
-        if (kd?.status === "error") {
+        if (isKakaoDeepFailureStatus(kd?.status)) {
           setKakaoData(kd);
           setHasAdvanced(true);
           setKakaoPollEnabled(false);
@@ -703,7 +712,9 @@ export default function HomePage() {
                       )}
 
                       {/* 💡 2. 고급 검색 점수 차이 안내 (오직 '기본 검색' 화면에 카카오 데이터가 도착했을 때만 뜸!) */}
-                      {!isAdvancedView && kakaoData && (
+                      {!isAdvancedView &&
+                        kakaoData &&
+                        !isKakaoDeepFailureStatus(kakaoData.status) && (
                         <>
                           {scoreDiff >= 1.0 && (
                             <div className="mb-6 rounded-xl border-2 border-red-400 bg-red-50 px-4 py-3 text-red-800 animate-in zoom-in duration-500 shadow-sm">
@@ -735,40 +746,47 @@ export default function HomePage() {
                       )}
                     </div>
 
-                    {isAdvancedView &&
-                      kakaoData &&
-                      kakaoData.status !== "error" &&
-                      Number(kakaoData.realScore) >= 3.5 && (
-                        <div
-                          className={`mb-4 flex w-full items-center justify-center gap-2.5 rounded-2xl border px-4 py-3.5 text-center text-sm font-bold leading-snug shadow-md animate-in slide-in-from-top duration-700 ${
-                            Number(kakaoData.realScore) >= 4.0
-                              ? "border-amber-300/80 bg-gradient-to-r from-amber-200 via-yellow-300 to-amber-300 text-amber-950"
-                              : "border-slate-300/80 bg-gradient-to-r from-slate-400 to-slate-500 text-white"
-                          }`}
-                        >
-                          <span className="text-2xl shrink-0" aria-hidden>
-                            {Number(kakaoData.realScore) >= 4.0 ? "🏆" : "🚩"}
-                          </span>
-                          <span>
-                            {Number(kakaoData.realScore) >= 4.0
-                              ? translations[lang].kakaoTrophyBanner
-                              : translations[lang].kakaoFlagBanner}
-                          </span>
-                        </div>
-                      )}
+                    {!isKakaoDeepFailureStatus(kakaoData?.status) ||
+                    !isAdvancedView ? (
+                      <>
+                        {isAdvancedView &&
+                          kakaoData &&
+                          !isKakaoDeepFailureStatus(kakaoData.status) &&
+                          Number(kakaoData.realScore) >= 3.5 && (
+                            <div
+                              className={`mb-4 flex w-full items-center justify-center gap-2.5 rounded-2xl border px-4 py-3.5 text-center text-sm font-bold leading-snug shadow-md animate-in slide-in-from-top duration-700 ${
+                                Number(kakaoData.realScore) >= 4.0
+                                  ? "border-amber-300/80 bg-gradient-to-r from-amber-200 via-yellow-300 to-amber-300 text-amber-950"
+                                  : "border-slate-300/80 bg-gradient-to-r from-slate-400 to-slate-500 text-white"
+                              }`}
+                            >
+                              <span className="text-2xl shrink-0" aria-hidden>
+                                {Number(kakaoData.realScore) >= 4.0 ? "🏆" : "🚩"}
+                              </span>
+                              <span>
+                                {Number(kakaoData.realScore) >= 4.0
+                                  ? translations[lang].kakaoTrophyBanner
+                                  : translations[lang].kakaoFlagBanner}
+                              </span>
+                            </div>
+                          )}
 
-                    {/* 💡 거대한 숫자 점수 UI */}
-                    {typeof realScore === "number" && (
-                      <div className="flex flex-col items-center justify-center mt-6 mb-6 animate-in fade-in duration-700">
-                        <div className="text-7xl font-black tracking-tighter text-slate-800 flex items-baseline gap-2">
-                          {realScore.toFixed(1)}
-                        </div>
-                      </div>
-                    )}
+                        {/* 💡 거대한 숫자 점수 UI */}
+                        {typeof realScore === "number" && (
+                          <div className="flex flex-col items-center justify-center mt-6 mb-6 animate-in fade-in duration-700">
+                            <div className="text-7xl font-black tracking-tighter text-slate-800 flex items-baseline gap-2">
+                              {realScore.toFixed(1)}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    ) : null}
                   </header>
 
                   <section className="space-y-6">
-                    {isAdvancedView && kakaoData?.status === "error" ? (
+                    {isAdvancedView &&
+                    kakaoData &&
+                    isKakaoDeepFailureStatus(kakaoData.status) ? (
                       <div
                         className={`rounded-2xl border px-4 py-4 text-sm ${
                           isCritical
@@ -814,7 +832,8 @@ export default function HomePage() {
                     )}
 
                     {isAdvancedView &&
-                      kakaoData?.status !== "error" &&
+                      kakaoData &&
+                      !isKakaoDeepFailureStatus(kakaoData.status) &&
                       String(kakaoData?.kakao_matched_name ?? "").trim() !==
                         "" && (
                         <div
@@ -953,7 +972,8 @@ export default function HomePage() {
 
                     {isAdvancedView &&
                       chartDetails &&
-                      kakaoData?.status !== "error" && (
+                      kakaoData &&
+                      !isKakaoDeepFailureStatus(kakaoData.status) && (
                       <div>
                         <h3 className={`text-sm font-bold mb-3 ${isCritical ? 'text-slate-200' : 'text-slate-800'}`}>
                           {translations[lang].detailsTitle}
@@ -1005,7 +1025,7 @@ export default function HomePage() {
                       <button
                         type="button"
                         onClick={() => {
-                          if (kakaoData?.status === "error") {
+                          if (isKakaoDeepFailureStatus(kakaoData?.status)) {
                             setIsAdvancedView(true);
                             return;
                           }

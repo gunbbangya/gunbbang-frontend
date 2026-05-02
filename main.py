@@ -718,60 +718,123 @@ _JSON_RULES_STRICT = (
 
 def get_fast_prompt(lang, place_info):
     addr = (place_info.get("address") or "").strip()
+    try:
+        google_rating_raw = float(place_info.get("rating") or 0)
+    except (TypeError, ValueError):
+        google_rating_raw = 0.0
+    google_rating_disp = ""
+    google_rating_anchor = None
+    if google_rating_raw and 0 < google_rating_raw <= 5.0:
+        google_rating_anchor = google_rating_raw
+        google_rating_disp = f"{google_rating_anchor:.2f}".rstrip("0").rstrip(".")
+        if "." not in google_rating_disp:
+            google_rating_disp = f"{google_rating_anchor:.1f}"
+    elif google_rating_raw and google_rating_raw > 5.0:
+        google_rating_anchor = float(_clamp(google_rating_raw, 1.0, 5.0))
+        google_rating_disp = f"{google_rating_anchor:.2f}".rstrip("0").rstrip(".")
     sec = _PROMPT_SECURITY_EN if lang == "en" else _PROMPT_SECURITY_KO
+
+    anchor_example = google_rating_anchor if google_rating_anchor is not None else 3.5
+    def _axes_for_example(base: float) -> str:
+        t = _clamp((base + 2.65) / 2.0, 1.0, 5.0)
+        v = _clamp((base + 2.55) / 2.0, 1.0, 5.0)
+        return f'"taste": {t:.2f}, "value": {v:.2f}, "service": 3.0, "time": 3.0, "hygiene": 3.0'
+
+    score_meaning_rating_line_en = (
+        f"Provided Google Maps star rating reference: **{google_rating_disp}** (numeric 1–5)."
+        if google_rating_disp
+        else "No trustworthy Google Maps star rating was supplied (treat snippet tone as primary)."
+    )
+    score_meaning_rating_line_ko = (
+        f"제공된 구글 평점(참고): **{google_rating_disp}** (1–5 척도)."
+        if google_rating_disp
+        else "제공된 구글 평점이 없거나 불명확하다(리뷰 스니펫 톤을 우선한다)."
+    )
+    scoring_anchor_en = (
+        f'Base your `realScore` on the provided Google rating ({google_rating_disp}). ONLY lower the score significantly if you detect '
+        "severe promotional patterns (high **eventProbability**) or critical fatal flaws (**hygiene** / rudeness / spoiled food in snippets). Otherwise, keep **realScore** close to that rating."
+        if google_rating_disp
+        else "Without a usable Google numeric rating anchor, infer a reasonable **realScore** from snippet sentiment; ONLY lower sharply for severe promotions or fatal flaws noted above."
+    )
+    scoring_anchor_ko = (
+        f'제공된 구글 평점({google_rating_disp})을 `realScore`의 기본값으로 삼아라. 노골적인 홍보 패턴(높은 **eventProbability**)이나 '
+        "치명적인 단점(위생, 심한 불친절)이 포착되었을 때만 점수를 크게 깎아라. 별다른 문제가 없다면 구글 평점과 유사하게 유지해라."
+        if google_rating_disp
+        else "구글 평점 숫자가 없거나 불명확하면 리뷰 스니펫 톤으로 합리적 `realScore`를 두되, 과한 홍보·치명 결함만 있을 때만 크게 낮춰라."
+    )
+
     if lang == "en":
         instruction = (
-            "You are a 'First-Line Review Risk Screener' (analyze Google snippet reviews only). Base score is 2.5. "
+            "You are a 'First-Line Review Risk Screener' (analyze Google snippet reviews only). "
             "Output JSON only—see rules below."
         )
         guidelines = f"""
         [Score meaning — CRITICAL]
-        - **realScore is NOT a 'restaurant quality / 맛집' score.** It is a conservative **reference risk signal from sparse Google-snippet reviews only**.
+        - **realScore is NOT a 'restaurant quality / 맛집' score.** It is a **reference risk signal from sparse Google-snippet reviews** (screening tier).
         - You MUST include **scoreMeaning** exactly as the string `"review_risk_screening"` (do not rename or localize this key's value).
+        - {score_meaning_rating_line_en}
 
         {_HALLUCINATION_RULE_EN}
-        {_TASTE_VALUE_NEUTRAL_EN}
         {_EVENT_PROB_RULE_EN}
+
+        [realScore from Google rating + snippets]
+        - {scoring_anchor_en}
+        - Clamp **realScore** to 1.0–5.0.
 
         Other detail scores (service, time, hygiene): JSON floats 1.0–5.0; if unmentioned, default 3.0—not 0.
 
-        [Detection & scoring]
-        1) Fatal flaws ONLY: poor hygiene (bugs/hair), extreme rudeness, spoiled food — slash scores only for these.
-        2) Reference info (mention in aiSummary): high prices, long waits, parking — not fatal flaws; include as FYI without slashing solely for those.
+        [Detection & adjustments]
+        1) Fatal flaws ONLY for deep cuts in **realScore**: poor hygiene cues, extreme rudeness, spoiled food—in snippet text.
+        2) Reference info (mention in aiSummary): high prices, long waits, parking — not fatal; do NOT slash **realScore** heavily for those alone.
         3) NO usernames — use neutral terms ('some visitors').
 
-        Details keys: taste, value, service, time, hygiene — all numeric JSON floats only.
+        Details keys: taste, value, service, time, hygiene — floats 1.0–5.0; tune **taste**/**value** with snippet tone alongside **realScore** (never output 0.0 for taste or value).
         """
+        rs_ex = anchor_example
         json_format = (
-            '{ "translatedName": "", "realScore": 2.5, "scoreMeaning": "review_risk_screening", "eventProbability": 0, '
+            '{ "translatedName": "", "realScore": '
+            + str(round(rs_ex, 2))
+            + ', "scoreMeaning": "review_risk_screening", "eventProbability": 0, '
             '"aiSummary": "", '
-            '"details": { "taste": 2.75, "value": 2.75, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }'
+            + '"details": { '
+            + _axes_for_example(rs_ex)
+            + " } }"
         )
     else:
         instruction = (
-            "당신은 구글 스니펫 리뷰를 보는 '1차 리뷰 리스크 필터링' 역할입니다. 기준점은 2.5점입니다. "
-            "아래 규칙을 따르고 출력은 오직 JSON이다."
+            "당신은 구글 스니펫 리뷰를 보는 '1차 리뷰 리스크 필터링' 역할입니다. 아래 규칙을 따르고 출력은 오직 JSON이다."
         )
         guidelines = f"""
         [점수 의미 — 필수]
-        - **realScore는 '맛집 점수'가 아니다.** 구글 스니펫에 노출된 짧은 리뷰만으로 본 **1차 리스크·참고 신호**다.
+        - **realScore는 '맛집 점수'가 아니다.** 구글 스니펫 기반 **1차 리스크·참고 신호**다.
         - **scoreMeaning** 키를 반드시 포함하고 값은 정확히 `"review_risk_screening"` 문자열로만 출력한다(번역·다른 문자열 금지).
+        - {score_meaning_rating_line_ko}
 
         {_HALLUCINATION_RULE_KO}
-        {_TASTE_VALUE_NEUTRAL_KO}
         {_EVENT_PROB_RULE_KO}
+
+        [realScore — 구글 평점 참고]
+        - {scoring_anchor_ko}
+        - **realScore**는 1.0~5.0으로 클램프한다.
 
         service·time·hygiene는 1.0~5.0 실수; 언급이 거의 없으면 3.0 기본(0 불가).
 
         [감점·참고]
-        1) 치명적 결함만: 위생 불량·심한 불친절·상한 음식.
-        2) 비싼 가격·웨이팅·주차는 참고로 요약에만.
+        1) **realScore**를 크게 내릴 치명적 근거: 위생 불량·심한 불친절·상한 음식 등 스니펫 근거.
+        2) 비싼 가격·웨이팅·주차만으로 **realScore**를 크게 내리지 말고 요약 참고만.
         3) 닉네임 금지.
+
+        [taste·value 세부축] 0 불가 — 스니펫 톤에 맞게 1.0~5.0 실수만.
         """
+        rs_ex_ko = anchor_example
         json_format = (
-            '{ "translatedName": "", "realScore": 2.5, "scoreMeaning": "review_risk_screening", "eventProbability": 0, '
+            '{ "translatedName": "", "realScore": '
+            + str(round(rs_ex_ko, 2))
+            + ', "scoreMeaning": "review_risk_screening", "eventProbability": 0, '
             '"aiSummary": "", '
-            '"details": { "taste": 2.75, "value": 2.75, "service": 3.0, "time": 3.0, "hygiene": 3.0 } }'
+            + '"details": { '
+            + _axes_for_example(rs_ex_ko)
+            + " } }"
         )
 
     json_rules = _JSON_RULES_STRICT
@@ -786,6 +849,19 @@ def get_fast_prompt(lang, place_info):
             f"{addr}\n"
         )
     )
+    rating_line = (
+        (
+            f"Google Maps star rating (1–5 scraped aggregate, anchoring hint for **realScore**): {google_rating_disp}\n"
+            if lang == "en"
+            else f"구글 지도 노출 평점(1–5, 스크래핑값·**realScore** 앵커 참고용): {google_rating_disp}\n"
+        )
+        if google_rating_disp
+        else (
+            "Google Maps star rating aggregate: unavailable — anchor **realScore** from snippet sentiment only.\n"
+            if lang == "en"
+            else "구글 평점(집계): 제공되지 않음 — 리뷰 스니펫 톤으로 **realScore**를 정한다.\n"
+        )
+    )
     return (
         f"{sec}\n\n"
         f"{instruction}\n{guidelines}\n"
@@ -793,6 +869,7 @@ def get_fast_prompt(lang, place_info):
         f"Required JSON keys and structure (constraints in guidelines):\n{json_format}\n"
         f"Input Data:\nName: {place_info['name']}\n"
         f"{addr_line}"
+        f"{rating_line}"
         f"Reviews:\n{' '.join(place_info['reviews'])}"
     )
 
@@ -836,6 +913,8 @@ def get_deep_prompt(
         [practicalInfo]
         - practicalInfo MUST be a JSON object with keys: parking, waiting, bestTime, foreignerAccess.
         - If evidence is missing for any field, use exactly: "리뷰상 확인 불가(Not mentioned)".
+
+        WARNING: The numeric values inside the JSON format example (e.g., 3.8, 2.75) are just structural placeholders. NEVER copy them. You MUST calculate actual scores based on the review text.
     """
     if lang == "en":
         core = f"""
@@ -895,7 +974,7 @@ def get_deep_prompt(
         """
         )
         json_format = (
-            '{ "realScore": 2.5, "eventProbability": 0, "dataConfidence": "low", "confidenceReason": "", '
+            '{ "realScore": 3.8, "eventProbability": 0, "dataConfidence": "low", "confidenceReason": "", '
             '"romanizedName": "", "aiSummary": "", '
             '"details": { "taste": 2.75, "value": 2.75, "service": 3.0, "time": 3.0, "hygiene": 3.0 }, '
             '"mustTryMenus": [], "vibeTags": [], "riskFlags": [], '
@@ -961,7 +1040,7 @@ def get_deep_prompt(
         """
         )
         json_format = (
-            '{ "realScore": 2.5, "eventProbability": 0, "dataConfidence": "low", "confidenceReason": "", '
+            '{ "realScore": 3.8, "eventProbability": 0, "dataConfidence": "low", "confidenceReason": "", '
             '"romanizedName": "", "aiSummary": "", '
             '"details": { "taste": 2.75, "value": 2.75, "service": 3.0, "time": 3.0, "hygiene": 3.0 }, '
             '"mustTryMenus": [], "vibeTags": [], "riskFlags": [], '
