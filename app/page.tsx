@@ -145,6 +145,8 @@ const translations: Record<
     planBComingSoon: "준비 중입니다. 다음 업데이트에서 만나요!",
     advancedDeepFactTitle: "현지 로컬 DB 심층 팩트 체크",
     advancedAnalyzeFailedTitle: "심층 분석을 완료할 수 없습니다",
+    advancedAnalyzeInsufficientBody:
+      "현지 데이터가 부족하거나, 식당 방침으로 후기를 제공하지 않는 곳입니다.",
     kakaoSourceSearchPlace: "검색 가게",
     kakaoSourceReviewOrigin: "리뷰 출처",
     kakaoSourceAddress: "주소",
@@ -220,6 +222,8 @@ const translations: Record<
     planBComingSoon: "Coming soon in a future release.",
     advancedDeepFactTitle: "Deep fact check (local review DB)",
     advancedAnalyzeFailedTitle: "Advanced analysis unavailable",
+    advancedAnalyzeInsufficientBody:
+      "Insufficient local data, or the restaurant has disabled public reviews.",
     kakaoSourceSearchPlace: "Matched place",
     kakaoSourceReviewOrigin: "Review source",
     kakaoSourceAddress: "Address",
@@ -802,11 +806,13 @@ export default function HomePage() {
                           <span>{translations[lang].advancedAnalyzeFailedTitle}</span>
                         </p>
                         <p className="leading-relaxed pl-[1.75rem] text-sm whitespace-pre-wrap break-keep">
-                          {maskBackendReason(
-                            typeof kakaoData.reason === "string"
-                              ? kakaoData.reason
-                              : "",
-                          )}
+                          {kakaoData.status === "insufficient_reviews"
+                            ? translations[lang].advancedAnalyzeInsufficientBody
+                            : maskBackendReason(
+                                typeof kakaoData.reason === "string"
+                                  ? kakaoData.reason
+                                  : "",
+                              )}
                         </p>
                       </div>
                     ) : (

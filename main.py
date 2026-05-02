@@ -1707,11 +1707,7 @@ def run_kakao_advanced_analysis(
 
             if useful_cnt < 5 or len(raw_reviews) == 0:
                 # GPT 호출 금지 + DB 저장 — 리뷰 li 미수집·후기 미제공·fallback 제거 후 raw=[] 인 경우 포함
-                ins_msg = (
-                    "카카오 장소 페이지에서 참고 가능한 후기 텍스트를 수집하지 못했습니다(후기 미제공·UI 변경 가능)."
-                    if len(raw_reviews) == 0
-                    else "실질적으로 참고할 만한 카카오 리뷰가 5개 미만이라 고급 분석을 제공하기 어렵습니다."
-                )
+                ins_msg = "현지 로컬 데이터베이스에서 참고 가능한 후기를 수집하지 못했습니다. (리뷰가 너무 적거나 가게 방침으로 미제공 상태일 수 있습니다.)"
                 payload = {
                     "status": "insufficient_reviews",
                     "reason": ins_msg,
