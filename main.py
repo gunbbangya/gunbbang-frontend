@@ -1678,12 +1678,31 @@ Avoid definitive language. Prefer CAUTION/OK with low confidence rather than GO.
 - You may omit those objects from output; if present, copy EXACTLY without modification.
 - confidence.usedReviewCount MUST equal USED_REVIEW_COUNT_HINT above.
 """
+    output_lang_rules = (
+        "\n[LANGUAGE — user-facing strings in JSON]\n"
+        "Write all user-facing natural-language string values in English.\n"
+        "Keep JSON keys and every enum/token value in English exactly as specified "
+        "(e.g. decision.label must be one of GO|OK|CAUTION|AVOID|INSUFFICIENT_DATA; riskFlags.type/level; confidence.level; importance; etc.).\n"
+        "These explanatory fields (and similar descriptive text) must be English: oneLine, shortReason, whoShouldGo, whoShouldAvoid, "
+        "mustKnowBeforeGoing[].point and .evidence, practicalInfo string values (except the literal token \"Not mentioned in reviews.\" when required by the schema), "
+        "foodSignals descriptive strings, confidence.reason, confidence.dataLimitations[], riskFlags[].reason, alternativeRecommendation.reason.\n"
+        if lang == "en"
+        else
+        "\n[LANGUAGE — user-facing strings in JSON]\n"
+        "Write all user-facing natural-language string values in Korean.\n"
+        "Keep JSON keys and every enum/token value in English exactly as specified "
+        "(예: decision.label은 GO|OK|CAUTION|AVOID|INSUFFICIENT_DATA 중 하나로 영어 유지; riskFlags.type/level, confidence.level, importance 등은 영어 토큰 유지).\n"
+        "스키마에서 요구하는 경우, 알 수 없음은 문자 그대로 \"Not mentioned in reviews.\" 를 사용합니다.\n"
+        "다음 필드 및 같은 성격의 설명 문구는 한국어로 작성: oneLine, shortReason, whoShouldGo, whoShouldAvoid, "
+        "mustKnowBeforeGoing의 point·evidence, practicalInfo의 각 값(위 예외 토큰 제외), foodSignals의 설명 문자열, confidence.reason, confidence.dataLimitations 항목, "
+        "riskFlags[].reason, alternativeRecommendation.reason 등.\n"
+    )
     return (
         f"{sec}\n\n"
         f"{instruction}\n{guidelines}{sparse_block}\n"
         f"[JSON — output rules]\n{json_rules}\n"
         f"Required JSON keys and structure:\n{json_format}\n"
-        f"{immutable_rule}\n"
+        f"{immutable_rule}\n{output_lang_rules}\n"
         f"[Anonymous aggregated signals]\n{json.dumps(meta_blob, ensure_ascii=False)}\n"
         f"{review_header}"
         f"Target (venue name): {place_name}\nReviews:\n{reviews_text}"

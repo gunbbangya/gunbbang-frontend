@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Loader2, Search, Map, ChevronLeft } from "lucide-react";
+import { Loader2, Map, ChevronLeft } from "lucide-react";
 import MapOverlay from "./MapOverlay";
 import PlanBSection from "./PlanBSection";
 import type { PlanBPayload } from "./PlanBSection";
@@ -12,6 +12,135 @@ const LANG_STORAGE_KEY = "jjin-view:lang";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://gunbbang-backend.onrender.com";
+
+const PURPOSE_VALUES = [
+  "solo",
+  "date",
+  "group",
+  "foreignerFriendly",
+  "lowRisk",
+  "quickMeal",
+] as const;
+
+function getDecisionDisplayLabel(value: unknown, lang: Lang): string {
+  const raw = String(value ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "_");
+  if (lang === "en") {
+    if (raw === "INSUFFICIENT_DATA") return "INSUFFICIENT DATA";
+    return raw || "—";
+  }
+  const ko: Record<string, string> = {
+    GO: "추천",
+    OK: "무난함",
+    CAUTION: "주의",
+    AVOID: "피하는 편이 좋음",
+    INSUFFICIENT_DATA: "정보 부족",
+  };
+  return ko[raw] || raw || "—";
+}
+
+function getRiskTypeLabel(value: unknown, lang: Lang): string {
+  const t = String(value ?? "").trim().toLowerCase();
+  if (lang === "en") {
+    const en: Record<string, string> = {
+      waiting: "Waiting",
+      service: "Service",
+      hygiene: "Hygiene",
+      price: "Price",
+      taste: "Taste",
+      ordering: "Ordering",
+      crowding: "Crowding",
+      tourist_trap: "Tourist trap risk",
+      data_limit: "Data limitation",
+    };
+    return en[t] || t;
+  }
+  const ko: Record<string, string> = {
+    waiting: "대기",
+    service: "서비스",
+    hygiene: "위생",
+    price: "가격",
+    taste: "맛",
+    ordering: "주문 난이도",
+    crowding: "혼잡",
+    tourist_trap: "관광객 낚시 위험",
+    data_limit: "데이터 한계",
+  };
+  return ko[t] || t;
+}
+
+function getRiskLevelLabel(value: unknown, lang: Lang): string {
+  const lv = String(value ?? "").trim().toLowerCase();
+  if (lang === "en") {
+    if (lv === "high") return "High";
+    if (lv === "medium") return "Medium";
+    if (lv === "low") return "Low";
+    return lv || "—";
+  }
+  if (lv === "high") return "높음";
+  if (lv === "medium") return "보통";
+  if (lv === "low") return "낮음";
+  return lv || "—";
+}
+
+function getPurposeLabel(value: string, lang: Lang): string {
+  const v = value.trim();
+  if (lang === "en") {
+    const en: Record<string, string> = {
+      solo: "Solo",
+      date: "Date",
+      group: "Group",
+      foreignerFriendly: "Foreigner-friendly",
+      lowRisk: "Low-risk",
+      quickMeal: "Quick meal",
+    };
+    return en[v] || v;
+  }
+  const ko: Record<string, string> = {
+    solo: "혼밥",
+    date: "데이트",
+    group: "단체",
+    foreignerFriendly: "외국인 친화",
+    lowRisk: "실패 확률 낮음",
+    quickMeal: "빠른 식사",
+  };
+  return ko[v] || v;
+}
+
+function getPracticalFieldLabel(key: string, lang: Lang): string {
+  if (lang === "en") {
+    const map: Record<string, string> = {
+      waiting: "Waiting",
+      parking: "Parking",
+      soloFriendly: "Solo-friendly",
+      groupFriendly: "Group-friendly",
+      dateFriendly: "Date-friendly",
+      foreignerAccess: "Foreigner access",
+      orderingDifficulty: "Ordering difficulty",
+      englishMenu: "English menu",
+      bestTimeToVisit: "Best time to visit",
+    };
+    return map[key] || key;
+  }
+  const map: Record<string, string> = {
+    waiting: "대기",
+    parking: "주차",
+    soloFriendly: "혼밥",
+    groupFriendly: "단체",
+    dateFriendly: "데이트",
+    foreignerAccess: "외국인 접근",
+    orderingDifficulty: "주문 난이도",
+    englishMenu: "영어 메뉴",
+    bestTimeToVisit: "추천 시간대",
+  };
+  return map[key] || key;
+}
+
+function getConfidenceLevelLabel(value: unknown, lang: Lang): string {
+  return getRiskLevelLabel(value, lang);
+}
 
 const translations: Record<
   Lang,
@@ -105,15 +234,26 @@ const translations: Record<
     homeFindDesc: string;
     homeCheckTitle: string;
     homeCheckDesc: string;
-    navLegacySearch: string;
+    homeSubtitle: string;
     findFlowTitle: string;
     findAreaLabel: string;
+    findAreaPlaceholder: string;
     findCategoryLabel: string;
+    findCategoryPlaceholder: string;
     findPurposeLabel: string;
+    findPurposeAny: string;
     findSubmit: string;
     findLoading: string;
+    findVisitSafetyLabel: string;
+    findConfidenceLabel: string;
+    findUsedReviewsLabel: string;
     checkFlowTitle: string;
     checkCandidateHint: string;
+    checkRestaurantNameLabel: string;
+    checkNamePlaceholder: string;
+    checkFindCandidatesButton: string;
+    candidateGoogleRatingLine: string;
+    candidateReviewsWord: string;
     limitedScanHeadline: string;
     limitedScanLine1: string;
     limitedScanLine2: string;
@@ -121,6 +261,15 @@ const translations: Record<
     verifiedAdvancedHeadline: string;
     verifiedAdvancedLine1: string;
     basicSnippetBadge: string;
+    scoreDiffHigh: string;
+    scoreDiffMed: string;
+    scoreDiffLow: string;
+    criticalScoreBanner: string;
+    visitSafetyMetricLabel: string;
+    limitedGoogleReferenceLabel: string;
+    approxMetersLabel: string;
+    confidenceReasonLabel: string;
+    cardDataLimitationsTitle: string;
   }
 > = {
   ko: {
@@ -166,7 +315,7 @@ const translations: Record<
     overloadError: "현재 접속자가 많아 AI가 과부하 상태입니다. 약 1분 후 다시 시도해 주세요!",
     energyLabel: "오늘의 분석 에너지",
     advancedButton: "🔥 고급 심층 분석 보기",
-    returnBasic: "↩️ 기본 확인 (구글 샘플)으로",
+    returnBasic: "↩️ 제한된 장소 확인(참고) 보기로",
     advancedStatus: "🔥 심층 분석 완료",
     kakaoTrophyBanner: "황금 트로피 획득! 전국구 인생 맛집 등극!",
     kakaoFlagBanner: "검증된 맛집 깃발 획득! 실패 없는 맛집 등극!",
@@ -223,15 +372,27 @@ const translations: Record<
     homeCheckTitle: "맛집 검증하기",
     homeCheckDesc:
       "가려는 식당명을 입력하면, 리뷰 리스크와 근처 대안을 분석해드려요.",
-    navLegacySearch: "구글 빠른 스캔 (제한적)으로 검색…",
+    homeSubtitle: "검증된 심층 분석과 제한된 장소 확인을 구분합니다.",
     findFlowTitle: "검증된 식당 찾기",
-    findAreaLabel: "지역 (예: 연남동, 홍대, 강남구)",
+    findAreaLabel: "지역",
+    findAreaPlaceholder: "지역 예시: 연남동, 홍대, 강남구",
     findCategoryLabel: "음식 종류 (선택)",
+    findCategoryPlaceholder: "음식 종류 선택: 삼겹살, 한식, 라멘, 치킨, 카페",
     findPurposeLabel: "목적 (선택)",
+    findPurposeAny: "선택 안 함",
     findSubmit: "검증된 가게 보기",
     findLoading: "DB에서 불러오는 중…",
-    checkFlowTitle: "식당명으로 검증",
-    checkCandidateHint: "구글에서 후보를 찾은 뒤, 맞는 장소를 선택하세요.",
+    findVisitSafetyLabel: "방문 안전도",
+    findConfidenceLabel: "신뢰도",
+    findUsedReviewsLabel: "사용 리뷰 수",
+    checkFlowTitle: "맛집 검증하기",
+    checkCandidateHint:
+      "식당명으로 검색해 장소 후보를 확인한 뒤, 맞는 곳을 선택하세요.",
+    checkRestaurantNameLabel: "식당명",
+    checkNamePlaceholder: "가려는 식당 이름을 입력하세요",
+    checkFindCandidatesButton: "후보 찾기",
+    candidateGoogleRatingLine: "구글 평점",
+    candidateReviewsWord: "리뷰 수",
     limitedScanHeadline: "제한된 장소 확인",
     limitedScanLine1: "심층 검증을 완료하지 못했습니다.",
     limitedScanLine2: "카카오맵 리뷰가 부족하거나 접근이 제한되어 있습니다.",
@@ -240,6 +401,15 @@ const translations: Record<
     verifiedAdvancedHeadline: "검증된 심층 분석",
     verifiedAdvancedLine1: "카카오맵 유효 리뷰 {used}개 기준",
     basicSnippetBadge: "제한된 장소 확인 (구글 샘플)",
+    scoreDiffHigh: "심층 분석 점수와 {diff}점 이상 차이가 납니다.",
+    scoreDiffMed: "심층 분석 점수와 {diff}점 차이가 납니다.",
+    scoreDiffLow: "심층 분석상 실제 체감 평가가 참고 점수보다 높게 나왔습니다.",
+    criticalScoreBanner: "점수가 매우 낮음 — 참고용 신호로만 활용하세요.",
+    visitSafetyMetricLabel: "방문 안전 점수",
+    limitedGoogleReferenceLabel: "구글(참고)",
+    approxMetersLabel: "약 {n}m",
+    confidenceReasonLabel: "근거",
+    cardDataLimitationsTitle: "데이터 한계",
   },
   en: {
     loadingMessages: [
@@ -284,7 +454,7 @@ const translations: Record<
     overloadError: "AI is currently overloaded. Please try again in about 1 minute!",
     energyLabel: "Daily Energy",
     advancedButton: "🔥 View Advanced Deep Analysis",
-    returnBasic: "↩️ Back to limited Google sample view",
+    returnBasic: "↩️ View limited place check (reference)",
     advancedStatus: "🔥 Deep Analysis Complete",
     kakaoTrophyBanner: "Gold trophy earned! A national-tier, life-changing spot!",
     kakaoFlagBanner: "Verified map flag earned! A reliable, no-fail pick!",
@@ -341,15 +511,27 @@ const translations: Record<
     homeCheckTitle: "Check a restaurant",
     homeCheckDesc:
       "Already have a place in mind? Check risks and safer nearby alternatives.",
-    navLegacySearch: "Search with limited Google snippet scan…",
+    homeSubtitle: "We separate verified advanced analysis from limited place checks.",
     findFlowTitle: "Find verified spots",
-    findAreaLabel: "Area (e.g. Yeonnam, Hongdae, Gangnam-gu)",
+    findAreaLabel: "Area",
+    findAreaPlaceholder: "Area examples: Yeonnam-dong, Hongdae, Gangnam-gu",
     findCategoryLabel: "Food type (optional)",
+    findCategoryPlaceholder: "Food type: Korean BBQ, Korean food, ramen, chicken, cafe",
     findPurposeLabel: "Purpose (optional)",
+    findPurposeAny: "Any",
     findSubmit: "Show verified places",
     findLoading: "Loading from database…",
-    checkFlowTitle: "Verify by restaurant name",
-    checkCandidateHint: "Pick the correct place from Google candidates.",
+    findVisitSafetyLabel: "Visit safety",
+    findConfidenceLabel: "Confidence",
+    findUsedReviewsLabel: "Reviews used",
+    checkFlowTitle: "Check a restaurant",
+    checkCandidateHint:
+      "Search by restaurant name to see place candidates, then pick the correct one.",
+    checkRestaurantNameLabel: "Restaurant name",
+    checkNamePlaceholder: "Enter the restaurant name",
+    checkFindCandidatesButton: "Find candidates",
+    candidateGoogleRatingLine: "Google rating",
+    candidateReviewsWord: "reviews",
     limitedScanHeadline: "Limited place check",
     limitedScanLine1: "Advanced verification could not be completed.",
     limitedScanLine2: "Kakao reviews may be unavailable, restricted, or insufficient.",
@@ -358,8 +540,25 @@ const translations: Record<
     verifiedAdvancedHeadline: "Verified advanced analysis",
     verifiedAdvancedLine1: "Based on {used} useful Kakao reviews",
     basicSnippetBadge: "Limited place check (Google sample)",
+    scoreDiffHigh: "Deep analysis differs from the reference score by {diff}+ points.",
+    scoreDiffMed: "Deep analysis differs from the reference score by {diff} points.",
+    scoreDiffLow: "Deep analysis suggests on-the-ground sentiment is higher than the reference score.",
+    criticalScoreBanner: "Very low score — use only as a reference signal.",
+    visitSafetyMetricLabel: "Visit safety score",
+    limitedGoogleReferenceLabel: "Google (reference)",
+    approxMetersLabel: "~{n} m",
+    confidenceReasonLabel: "Reason",
+    cardDataLimitationsTitle: "Data limitations",
   },
 };
+
+function getImportanceLabel(value: unknown, lang: Lang): string {
+  const t = String(value ?? "").trim().toLowerCase();
+  if (t === "high") return translations[lang].importanceHigh;
+  if (t === "medium") return translations[lang].importanceMedium;
+  if (t === "low") return translations[lang].importanceLow;
+  return t || "—";
+}
 
 /** 레거시 매칭/크롤 오류 — LIMITED_SCAN(심층 불가) 페이로드는 여기서 제외한다. */
 function isKakaoDeepFailureStatus(kdOrStatus: unknown): boolean {
@@ -409,11 +608,10 @@ let kakaoTrophyFlagAlertKey: string | null = null;
 
 export default function HomePage() {
   const [lang, setLang] = useState<Lang>("ko");
-  const [searchQuery, setSearchQuery] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isSearching, setIsSearching] = useState(false);
   const [messageIndex, setMessageIndex] = useState(0);
   const [showResult, setShowResult] = useState(false);
+  const [isMapOpen, setIsMapOpen] = useState(false);
   
   const [realScore, setRealScore] = useState<number | null>(null);
   const [eventProb, setEventProb] = useState<number>(0);
@@ -436,9 +634,6 @@ export default function HomePage() {
     address: string;
   } | null>(null);
 
-  const [searchResults, setSearchResults] = useState<{ name: string; address: string }[]>([]);
-
-  const [isMapOpen, setIsMapOpen] = useState(false);
   const [redFlags, setRedFlags] = useState(0);
   const [goldFlags, setGoldFlags] = useState(0);
   const [userDailyCount, setUserDailyCount] = useState(0);
@@ -448,7 +643,7 @@ export default function HomePage() {
     "verified_advanced" | "basic_scan_only" | "pending" | "limited_scan" | null
   >(null);
 
-  type ProductFlow = "home" | "find" | "check" | "legacy";
+  type ProductFlow = "home" | "find" | "check";
   const [productFlow, setProductFlow] = useState<ProductFlow>("home");
   const [findArea, setFindArea] = useState("");
   const [findCategory, setFindCategory] = useState("");
@@ -656,44 +851,6 @@ export default function HomePage() {
       alert(translations[lang].kakaoFlagNotification);
     }
   }, [hasAdvanced, kakaoData, selectedPlace, lang]);
-
-  const handleSubmit = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!searchQuery.trim()) return;
-    setShowResult(false);
-    setSelectedPlace(null);
-    setSearchResults([]);
-    setIsSearching(true);
-    
-    // 💡 검색 새로 할 때 고급 뷰 상태 초기화
-    setHasAdvanced(false);
-    setKakaoData(null);
-    setBasicData(null);
-    setIsAdvancedView(false);
-    setKakaoPollEnabled(false);
-    setPlanB(null);
-    setAdvancedAnalysisStatus(null);
-    kakaoTrophyFlagAlertKey = null;
-
-    const fetchSearchResults = async () => {
-      try {
-        const params = new URLSearchParams({ q: searchQuery.trim() });
-        const response = await fetch(
-          `${API_BASE}/api/search?${params.toString()}`
-        );
-        if (!response.ok) throw new Error("Search response not ok");
-
-        const data: { name: string; address: string }[] = await response.json();
-        setSearchResults(data);
-      } catch (error) {
-        console.error(error);
-        alert(translations[lang].searchError);
-      } finally {
-        setIsSearching(false);
-      }
-    };
-    void fetchSearchResults();
-  };
 
   const handleAnalyzePlace = (place: { name: string; address: string }) => {
     if (userDailyCount >= 15) {
@@ -945,8 +1102,8 @@ export default function HomePage() {
           {showResult ? (
             <section className={`rounded-2xl border shadow-lg overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-500 transition-colors ${isCritical ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
               {isCritical && (
-                <div className="bg-red-900/80 py-1.5 text-center text-[10px] font-black tracking-[0.2em] text-red-100 uppercase animate-pulse">
-                  Critical Low Score : Unreliable Place
+                <div className="bg-red-900/80 py-1.5 text-center text-[10px] font-black tracking-wide text-red-100 animate-pulse break-keep px-2">
+                  {translations[lang].criticalScoreBanner}
                 </div>
               )}
 
@@ -1001,7 +1158,12 @@ export default function HomePage() {
                             <div className="mb-6 rounded-xl border-2 border-red-400 bg-red-50 px-4 py-3 text-red-800 animate-in zoom-in duration-500 shadow-sm">
                               <div className="flex items-center gap-2.5">
                                 <span className="text-xl">🚨</span>
-                                <p className="text-sm font-bold">고급 분석 결과와 {scoreDiff.toFixed(1)}점 차이가 납니다.</p>
+                                <p className="text-sm font-bold break-keep">
+                                  {translations[lang].scoreDiffHigh.replace(
+                                    "{diff}",
+                                    scoreDiff.toFixed(1),
+                                  )}
+                                </p>
                               </div>
                             </div>
                           )}
@@ -1009,7 +1171,12 @@ export default function HomePage() {
                             <div className="mb-6 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 text-amber-800 animate-in zoom-in duration-500 shadow-sm">
                               <div className="flex items-center gap-2.5">
                                 <span className="text-xl">⚠️</span>
-                                <p className="text-sm font-bold">고급 분석 결과와 {scoreDiff.toFixed(1)}점 차이가 납니다.</p>
+                                <p className="text-sm font-bold break-keep">
+                                  {translations[lang].scoreDiffMed.replace(
+                                    "{diff}",
+                                    scoreDiff.toFixed(1),
+                                  )}
+                                </p>
                               </div>
                             </div>
                           )}
@@ -1018,7 +1185,9 @@ export default function HomePage() {
                               <div className="flex items-start sm:items-center gap-2.5">
                                 <span className="text-xl mt-0.5 sm:mt-0">💎</span>
                                 <div>
-                                  <p className="text-sm font-bold">고급 분석 결과, 실사용자 평점이 오히려 더 높습니다.</p>
+                                  <p className="text-sm font-bold break-keep">
+                                    {translations[lang].scoreDiffLow}
+                                  </p>
                                 </div>
                               </div>
                             </div>
@@ -1147,9 +1316,12 @@ export default function HomePage() {
                               return (
                                 <dl className="mt-3 space-y-1 border-t border-amber-300/40 pt-2">
                                   <div className="flex gap-2">
-                                    <dt className="opacity-80">Google</dt>
+                                    <dt className="opacity-80 shrink-0">
+                                      {translations[lang].limitedGoogleReferenceLabel}
+                                    </dt>
                                     <dd>
-                                      ★{li.googleRating != null ? String(li.googleRating) : "—"} · reviews{" "}
+                                      ★{li.googleRating != null ? String(li.googleRating) : "—"} ·{" "}
+                                      {translations[lang].candidateReviewsWord}{" "}
                                       {li.googleReviewCount != null ? String(li.googleReviewCount) : "—"}
                                     </dd>
                                   </div>
@@ -1192,6 +1364,7 @@ export default function HomePage() {
                         {(() => {
                           const dec = (kakaoData.decision ?? {}) as Record<string, unknown>;
                           const lbl = String(dec.label ?? "").toUpperCase();
+                          const decisionDisplay = getDecisionDisplayLabel(dec.label, lang);
                           const cardBase = `rounded-xl border px-3 py-3 text-sm ${
                             isCritical
                               ? "border-slate-600 bg-slate-900/60 text-slate-100"
@@ -1233,9 +1406,11 @@ export default function HomePage() {
                             <div className="grid gap-3">
                               <div className={cardBase}>
                                 <p className={h2}>{translations[lang].cardDecision}</p>
-                                <p className={`text-2xl font-black ${labelColor}`}>{lbl || "—"}</p>
+                                <p className={`text-2xl font-black ${labelColor}`}>
+                                  {decisionDisplay}
+                                </p>
                                 <p className="mt-1 text-xs text-slate-500">
-                                  visit safety:{" "}
+                                  {translations[lang].visitSafetyMetricLabel}:{" "}
                                   <span className="font-semibold">
                                     {typeof dec.visitSafetyScore === "number"
                                       ? (dec.visitSafetyScore as number).toFixed(1)
@@ -1279,7 +1454,9 @@ export default function HomePage() {
                                         className="text-xs border-b border-slate-200/30 pb-2 last:border-0"
                                       >
                                         <span className="font-semibold">{m.point}</span>{" "}
-                                        <span className="opacity-80">({m.importance})</span>
+                                        <span className="opacity-80">
+                                          ({getImportanceLabel(m.importance, lang)})
+                                        </span>
                                         <p className="mt-0.5 opacity-90">{m.evidence}</p>
                                       </li>
                                     ))}
@@ -1294,8 +1471,11 @@ export default function HomePage() {
                                       const o = r as Record<string, unknown>;
                                       return (
                                         <li key={i} className="text-xs">
-                                          <span className="font-semibold">{String(o.type)}</span> /{" "}
-                                          <span>{String(o.level)}</span>
+                                          <span className="font-semibold">
+                                            {getRiskTypeLabel(o.type, lang)}
+                                          </span>
+                                          {" / "}
+                                          <span>{getRiskLevelLabel(o.level, lang)}</span>
                                           <p className="mt-0.5">{String(o.reason)}</p>
                                         </li>
                                       );
@@ -1309,7 +1489,9 @@ export default function HomePage() {
                                   <dl className="grid gap-1 text-xs">
                                     {Object.entries(pi).map(([k, v]) => (
                                       <div key={k} className="flex gap-2">
-                                        <dt className="w-40 shrink-0 opacity-70">{k}</dt>
+                                        <dt className="w-40 shrink-0 opacity-70">
+                                          {getPracticalFieldLabel(k, lang)}
+                                        </dt>
                                         <dd className="min-w-0 flex-1">{v}</dd>
                                       </div>
                                     ))}
@@ -1362,7 +1544,10 @@ export default function HomePage() {
                                           <p className="opacity-90">{String(a.oneLine ?? "")}</p>
                                           {typeof a.distanceMeters === "number" ? (
                                             <p className="text-[10px] mt-1 opacity-70">
-                                              ~{Math.round(a.distanceMeters as number)} m
+                                              {translations[lang].approxMetersLabel.replace(
+                                                "{n}",
+                                                String(Math.round(a.distanceMeters as number)),
+                                              )}
                                             </p>
                                           ) : null}
                                         </li>
@@ -1371,6 +1556,63 @@ export default function HomePage() {
                                   )}
                                 </div>
                               ) : null}
+                              {(() => {
+                                const conf = kakaoData.confidence as
+                                  | Record<string, unknown>
+                                  | undefined;
+                                if (!conf || typeof conf !== "object") return null;
+                                const lvl = conf.level;
+                                const reason =
+                                  typeof conf.reason === "string" ? conf.reason.trim() : "";
+                                const used = conf.usedReviewCount;
+                                const lims = Array.isArray(conf.dataLimitations)
+                                  ? (conf.dataLimitations as unknown[]).filter(
+                                      (x) => typeof x === "string" && String(x).trim(),
+                                    )
+                                  : [];
+                                if (
+                                  lvl == null &&
+                                  !reason &&
+                                  lims.length === 0 &&
+                                  used == null
+                                )
+                                  return null;
+                                return (
+                                  <div className={cardBase}>
+                                    <p className={h2}>{translations[lang].findConfidenceLabel}</p>
+                                    {lvl != null ? (
+                                      <p className="text-xs font-semibold">
+                                        {getConfidenceLevelLabel(lvl, lang)}
+                                      </p>
+                                    ) : null}
+                                    {used != null ? (
+                                      <p className="mt-1 text-[11px] text-slate-500">
+                                        {translations[lang].findUsedReviewsLabel}: {String(used)}
+                                      </p>
+                                    ) : null}
+                                    {reason ? (
+                                      <p className="mt-2 text-xs">
+                                        <span className="font-semibold text-slate-600">
+                                          {translations[lang].confidenceReasonLabel}:{" "}
+                                        </span>
+                                        {reason}
+                                      </p>
+                                    ) : null}
+                                    {lims.length > 0 ? (
+                                      <div className="mt-2">
+                                        <p className="text-[11px] font-bold text-slate-600">
+                                          {translations[lang].cardDataLimitationsTitle}
+                                        </p>
+                                        <ul className="mt-1 list-disc pl-4 text-[11px] space-y-0.5">
+                                          {lims.map((s, j) => (
+                                            <li key={j}>{String(s)}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           );
                         })()}
@@ -1647,8 +1889,18 @@ export default function HomePage() {
                     <button
                       type="button"
                       onClick={() => {
-                        setSearchQuery("");
                         setShowResult(false);
+                        setSelectedPlace(null);
+                        setHasAdvanced(false);
+                        setKakaoData(null);
+                        setBasicData(null);
+                        setIsAdvancedView(false);
+                        setKakaoPollEnabled(false);
+                        setPlanB(null);
+                        setAdvancedAnalysisStatus(null);
+                        setCheckSearchQuery("");
+                        setCheckCandidates([]);
+                        kakaoTrophyFlagAlertKey = null;
                         setProductFlow("home");
                       }}
                       className={`w-full rounded-xl border px-4 py-3 text-sm font-medium transition shadow-sm mt-2 ${
@@ -1691,10 +1943,8 @@ export default function HomePage() {
                 <>
                   <header className="mb-10 text-center relative z-10">
                     <h1 className="text-4xl font-extrabold tracking-tight text-slate-900">ZzinView</h1>
-                    <p className="mt-3 text-sm text-slate-500 max-w-md mx-auto">
-                      {lang === "ko"
-                        ? "검증된 심층 분석과 제한된 장소 확인을 구분합니다."
-                        : "We separate verified deep analysis from limited place checks."}
+                    <p className="mt-3 text-sm text-slate-500 max-w-md mx-auto break-keep">
+                      {translations[lang].homeSubtitle}
                     </p>
                   </header>
                   <div className="grid w-full max-w-lg gap-4 relative z-10">
@@ -1719,13 +1969,6 @@ export default function HomePage() {
                       </p>
                     </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setProductFlow("legacy")}
-                    className="mt-10 text-xs text-slate-500 underline-offset-2 hover:underline"
-                  >
-                    {translations[lang].navLegacySearch}
-                  </button>
                 </>
               ) : productFlow === "find" ? (
                 <div className="w-full max-w-lg space-y-6">
@@ -1744,6 +1987,7 @@ export default function HomePage() {
                       <input
                         value={findArea}
                         onChange={(e) => setFindArea(e.target.value)}
+                        placeholder={translations[lang].findAreaPlaceholder}
                         className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
                       />
                     </label>
@@ -1752,19 +1996,40 @@ export default function HomePage() {
                       <input
                         value={findCategory}
                         onChange={(e) => setFindCategory(e.target.value)}
+                        placeholder={translations[lang].findCategoryPlaceholder}
                         className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                        placeholder={lang === "ko" ? "예: 삼겹살, K-BBQ" : "e.g. K-BBQ, pork belly"}
                       />
                     </label>
-                    <label className="block text-sm font-bold text-slate-700">
-                      {translations[lang].findPurposeLabel}
-                      <input
-                        value={findPurpose}
-                        onChange={(e) => setFindPurpose(e.target.value)}
-                        className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                        placeholder="solo / date / group / foreignerFriendly / lowRisk / quickMeal"
-                      />
-                    </label>
+                    <div className="space-y-2">
+                      <p className="text-sm font-bold text-slate-700">{translations[lang].findPurposeLabel}</p>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setFindPurpose("")}
+                          className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                            findPurpose === ""
+                              ? "border-slate-900 bg-slate-900 text-white"
+                              : "border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300"
+                          }`}
+                        >
+                          {translations[lang].findPurposeAny}
+                        </button>
+                        {PURPOSE_VALUES.map((pv) => (
+                          <button
+                            key={pv}
+                            type="button"
+                            onClick={() => setFindPurpose(findPurpose === pv ? "" : pv)}
+                            className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                              findPurpose === pv
+                                ? "border-slate-900 bg-slate-900 text-white"
+                                : "border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300"
+                            }`}
+                          >
+                            {getPurposeLabel(pv, lang)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                     <button
                       type="submit"
                       disabled={findLoading}
@@ -1783,6 +2048,7 @@ export default function HomePage() {
                       const r = row as Record<string, unknown>;
                       const dec = (r.decision as Record<string, unknown>) || {};
                       const risks = Array.isArray(r.topRiskFlags) ? r.topRiskFlags : [];
+                      const conf = r.confidence as { level?: unknown } | undefined;
                       return (
                         <li
                           key={`${String(r.name)}-${idx}`}
@@ -1795,29 +2061,31 @@ export default function HomePage() {
                             {(r.area as { dong?: string })?.dong || ""}
                           </p>
                           <p className="mt-2 font-semibold text-slate-800">
-                            {String(dec.label ?? "")}{" "}
+                            {getDecisionDisplayLabel(dec.label, lang)}{" "}
                             <span className="text-slate-500 font-normal">
-                              · {lang === "ko" ? "방문 안전" : "visit safety"}{" "}
+                              · {translations[lang].findVisitSafetyLabel}{" "}
                               {dec.visitSafetyScore != null ? String(dec.visitSafetyScore) : "—"}
                             </span>
                           </p>
                           <p className="mt-1 text-xs text-slate-700">{String(dec.oneLine ?? "")}</p>
                           <p className="mt-1 text-[11px] text-slate-500">
-                            confidence: {String((r.confidence as { level?: string })?.level ?? "")} · used{" "}
-                            {String(r.usedReviewCount ?? "")}
+                            {translations[lang].findConfidenceLabel}:{" "}
+                            {getConfidenceLevelLabel(conf?.level, lang)} ·{" "}
+                            {translations[lang].findUsedReviewsLabel}{" "}
+                            {String(r.usedReviewCount ?? "—")}
                           </p>
                           {risks.length > 0 ? (
                             <ul className="mt-2 text-[11px] text-amber-900 space-y-1">
                               {(risks as { type?: string; level?: string }[]).map((x, i) => (
                                 <li key={i}>
-                                  {x.type} ({x.level})
+                                  {getRiskTypeLabel(x.type, lang)} ({getRiskLevelLabel(x.level, lang)})
                                 </li>
                               ))}
                             </ul>
                           ) : null}
                           {r.foreignerAccessHint ? (
                             <p className="mt-2 text-[11px] text-slate-600">
-                              {lang === "ko" ? "외국인 접근성" : "Foreigner access"}:{" "}
+                              {getPracticalFieldLabel("foreignerAccess", lang)}:{" "}
                               {String(r.foreignerAccessHint)}
                             </p>
                           ) : null}
@@ -1826,7 +2094,7 @@ export default function HomePage() {
                     })}
                   </ul>
                 </div>
-              ) : productFlow === "check" ? (
+              ) : (
                 <div className="w-full max-w-lg space-y-6">
                   <button
                     type="button"
@@ -1843,12 +2111,12 @@ export default function HomePage() {
                     className="flex flex-col gap-3 sm:flex-row sm:items-end"
                   >
                     <label className="flex-1 text-sm font-bold text-slate-700">
-                      {translations[lang].searchLabel}
+                      {translations[lang].checkRestaurantNameLabel}
                       <input
                         value={checkSearchQuery}
                         onChange={(e) => setCheckSearchQuery(e.target.value)}
                         className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                        placeholder={translations[lang].searchPlaceholder}
+                        placeholder={translations[lang].checkNamePlaceholder}
                       />
                     </label>
                     <button
@@ -1856,7 +2124,9 @@ export default function HomePage() {
                       disabled={checkSearching || !checkSearchQuery.trim()}
                       className="rounded-xl bg-slate-900 px-5 py-2 text-sm font-bold text-white disabled:bg-slate-400"
                     >
-                      {checkSearching ? translations[lang].searching : translations[lang].searchButton}
+                      {checkSearching
+                        ? translations[lang].searching
+                        : translations[lang].checkFindCandidatesButton}
                     </button>
                   </form>
                   <ul className="space-y-2">
@@ -1865,7 +2135,6 @@ export default function HomePage() {
                         <button
                           type="button"
                           onClick={() => {
-                            setProductFlow("legacy");
                             handleAnalyzePlace({ name: c.name, address: c.address });
                           }}
                           className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left text-sm text-slate-800 transition hover:bg-slate-100"
@@ -1874,7 +2143,8 @@ export default function HomePage() {
                           <p className="mt-0.5 text-xs text-slate-500">{c.address}</p>
                           {c.rating != null ? (
                             <p className="mt-1 text-[11px] text-slate-500">
-                              Google ★{c.rating} ({c.user_ratings_total ?? "—"} reviews)
+                              {translations[lang].candidateGoogleRatingLine} ★{c.rating} (
+                              {c.user_ratings_total ?? "—"} {translations[lang].candidateReviewsWord})
                             </p>
                           ) : null}
                         </button>
@@ -1882,91 +2152,6 @@ export default function HomePage() {
                     ))}
                   </ul>
                 </div>
-              ) : (
-                <>
-              <header className="mb-12 text-center relative z-10">
-                <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl mb-4 text-slate-900">
-                  {translations[lang].heroTitle}
-                </h1>
-                <p className="text-lg sm:text-xl text-slate-500 font-medium leading-relaxed">
-                  {translations[lang].heroSubtitle}
-                </p>
-              </header>
-
-              <div className="relative w-full max-w-2xl">
-                <span className="absolute -top-14 -left-28 text-7xl animate-bounce duration-[1200ms] select-none cursor-default drop-shadow-xl z-0">
-                  🍜
-                </span>
-                <span className="absolute -top-10 -right-28 text-7xl animate-bounce duration-[1500ms] delay-200 select-none cursor-default drop-shadow-xl z-0">
-                  🍔
-                </span>
-
-                <div className="absolute top-20 -left-24 w-12 h-12 flex items-center justify-center group/pizza z-[50]">
-                  <span className="text-4xl opacity-70 transition-transform duration-[6000ms] ease-linear pointer-events-none group-hover/pizza:scale-[80] group-hover/pizza:opacity-100 group-hover/pizza:z-[100] select-none origin-center">
-                    🍕
-                  </span>
-                </div>
-
-                <div className="absolute top-24 -right-24 w-12 h-12 flex items-center justify-center group/sushi z-[50]">
-                  <span className="text-4xl opacity-70 transition-transform duration-[7000ms] ease-linear pointer-events-none group-hover/sushi:scale-[80] group-hover/sushi:opacity-100 group-hover/sushi:z-[100] select-none origin-center">
-                    🍣
-                  </span>
-                </div>
-
-                <section className="w-full rounded-3xl border border-slate-200 bg-white px-6 py-8 shadow-2xl relative z-10">
-                  <form className="flex flex-col gap-4 sm:flex-row sm:items-end" onSubmit={handleSubmit}>
-                    <label className="flex-1">
-                      <span className="mb-3 block text-sm font-bold text-slate-700 ml-1">{translations[lang].searchLabel}</span>
-                      <div className="relative">
-                        <span className="pointer-events-none absolute inset-y-0 left-4 flex items-center text-slate-400">
-                          <Search className="h-5 w-5" />
-                        </span>
-                        <input
-                          type="text"
-                          value={searchQuery}
-                          onChange={(event) => setSearchQuery(event.target.value)}
-                          placeholder={translations[lang].searchPlaceholder}
-                          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-12 py-4 text-base text-slate-900 placeholder:text-slate-400 outline-none ring-0 transition focus:border-slate-600 focus:bg-white"
-                        />
-                      </div>
-                    </label>
-                    <button
-                      type="submit"
-                      disabled={!searchQuery.trim() || isSearching}
-                      className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-8 py-4 text-lg font-bold text-white shadow-lg transition hover:bg-slate-800 active:scale-95 disabled:bg-slate-300 sm:min-w-[140px]"
-                    >
-                      {isSearching ? translations[lang].searching : translations[lang].searchButton}
-                    </button>
-                  </form>
-
-                  <p className="mt-4 text-xs text-center text-slate-400">
-                    {translations[lang].recentHint}
-                  </p>
-
-                  {searchResults.length > 0 && (
-                    <div className="border-t border-slate-100 pt-4 mt-4 text-left">
-                      <p className="mb-2 text-xs font-medium text-slate-500">{translations[lang].searchResultsTitle}</p>
-                      <div className="max-h-64 overflow-y-auto pr-1">
-                        <ul className="space-y-2">
-                          {searchResults.map((place) => (
-                            <li key={`${place.name}-${place.address}`}>
-                              <button
-                                type="button"
-                                onClick={() => handleAnalyzePlace(place)}
-                                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left text-sm text-slate-800 transition hover:bg-slate-100"
-                              >
-                                <p className="font-medium text-slate-900">{place.name}</p>
-                                <p className="mt-0.5 text-xs text-slate-500">{place.address}</p>
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    </div>
-                  )}
-                </section>
-              </div>
-                </>
               )}
             </div>
           ) : (
