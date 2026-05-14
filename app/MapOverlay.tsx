@@ -92,7 +92,9 @@ export default function MapOverlay({
       setMarkers([]); 
       
       // 2. 백엔드에서 3.5점 이상 맛집 리스트 받아오기 (로컬 개발 시에는 http://localhost:10000 으로 바꿔야 할 수도 있습니다)
-      const res = await fetch("https://gunbbang-backend.onrender.com/api/map-flags");
+      const apiBase =
+        process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://gunbbang-backend.onrender.com";
+      const res = await fetch(`${apiBase}/api/map-flags`);
       const data = await res.json();
 
       const kakao = (window as any).kakao;

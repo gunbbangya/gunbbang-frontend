@@ -4,10 +4,10 @@ import time
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from scraper import search_and_get_reviews 
+from scraper import search_and_get_reviews, search_google_place_candidates 
 from dotenv import load_dotenv
 from pymongo import MongoClient
 import certifi
@@ -16,6 +16,7 @@ import threading
 import random
 from kakao_scraper import diagnose_kakao_place_match, get_deep_kakao_reviews
 from review_quality import filter_useful_reviews, get_review_text, normalize_review_text
+from analysis_utils import sanitize_ai_result
 
 load_dotenv()
 
@@ -526,114 +527,683 @@ def build_alternative_query(
     }
 
 
-def sanitize_ai_result(data: dict, mode: str) -> dict:
-    """OpenAI JSON 응답을 검증·정규화. mode: fast(스니펫)·deep(카카오 심층)."""
-    if not isinstance(data, dict):
-        data = {}
-    out = dict(data)
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    from math import asin, cos, radians, sin, sqrt
 
-    def _str_safe(x) -> str:
+    r = 6371000.0
+    p1, p2 = radians(lat1), radians(lat2)
+    dphi, dl = radians(lat2 - lat1), radians(lon2 - lon1)
+    a = sin(dphi / 2) ** 2 + cos(p1) * cos(p2) * sin(dl / 2) ** 2
+    return 2 * r * asin(sqrt(min(1.0, max(0.0, a))))
+
+
+def _waiting_risk_score_from_flags(risk_flags: list | None) -> float:
+    """Higher = worse waiting risk (sort alternatives ascending)."""
+    w = 0.0
+    for it in risk_flags or []:
+        if not isinstance(it, dict):
+            continue
+        if str(it.get("type") or "").strip().lower() != "waiting":
+            continue
+        lv = str(it.get("level") or "").strip().lower()
+        if lv == "high":
+            w = max(w, 3.0)
+        elif lv == "medium":
+            w = max(w, 2.0)
+        elif lv == "low":
+            w = max(w, 1.0)
+    return w
+
+
+def _review_reliability_score(review_pattern_stats: dict | None, used_review_count: int) -> float:
+    """0.0–1.0 blend for sorting (higher = more reliable corpus)."""
+    rp = review_pattern_stats if isinstance(review_pattern_stats, dict) else {}
+    try:
+        useful_ratio = float(rp.get("usefulReviewRatio") or 0.0)
+    except (TypeError, ValueError):
+        useful_ratio = 0.0
+    useful_ratio = max(0.0, min(1.0, useful_ratio))
+    try:
+        u = int(used_review_count)
+    except (TypeError, ValueError):
+        u = 0
+    used_part = max(0.0, min(1.0, u / 40.0))
+    return 0.55 * useful_ratio + 0.45 * used_part
+
+
+def upgrade_legacy_kakao_advanced_payload(kd: dict) -> dict:
+    """
+    In-place upgrade for cached Kakao rows that predate the decision-card schema.
+    """
+    if not isinstance(kd, dict):
+        return kd
+    if isinstance(kd.get("decision"), dict) and (kd.get("decision") or {}).get("label"):
+        return kd
+
+    def _str(x) -> str:
         return "" if x is None else str(x)
 
     try:
-        rs = float(out.get("realScore", 2.5))
+        rs = float(kd.get("realScore", 2.5))
     except (TypeError, ValueError):
         rs = 2.5
-    out["realScore"] = max(1.0, min(5.0, rs))
+    rs = max(1.0, min(5.0, rs))
+    dc = _str(kd.get("dataConfidence")).strip()
+    if dc not in ("insufficient", "low", "medium", "high"):
+        dc = "low"
 
+    if dc == "insufficient" or kd.get("status") == "insufficient_reviews":
+        label = "INSUFFICIENT_DATA"
+    elif rs >= 4.0:
+        label = "GO"
+    elif rs >= 3.5:
+        label = "OK"
+    elif rs >= 3.0:
+        label = "CAUTION"
+    else:
+        label = "AVOID"
+
+    nm = "Not mentioned in reviews."
+    pi_old = kd.get("practicalInfo") if isinstance(kd.get("practicalInfo"), dict) else {}
+    best_time = _str(pi_old.get("bestTimeToVisit") or pi_old.get("bestTime")).strip() or nm
+
+    kd["decision"] = {
+        "label": label,
+        "visitSafetyScore": rs,
+        "oneLine": _str(kd.get("aiSummary")).strip()[:240] or nm,
+        "shortReason": _str(kd.get("confidenceReason")).strip()[:400] or nm,
+    }
+    kd["whoShouldGo"] = []
+    kd["whoShouldAvoid"] = []
+    kd["mustKnowBeforeGoing"] = []
+    rf_old = kd.get("riskFlags")
+    new_rf: list[dict] = []
+    if isinstance(rf_old, list):
+        for it in rf_old:
+            if isinstance(it, dict) and it.get("type"):
+                new_rf.append(
+                    {
+                        "type": str(it.get("type") or "data_limit"),
+                        "level": str(it.get("level") or "low"),
+                        "reason": _str(it.get("reason")).strip() or nm,
+                    }
+                )
+            elif it is not None and str(it).strip():
+                new_rf.append({"type": "data_limit", "level": "low", "reason": str(it).strip()})
+    kd["riskFlags"] = new_rf
+
+    kd["practicalInfo"] = {
+        "waiting": _str(pi_old.get("waiting")).strip() or nm,
+        "parking": _str(pi_old.get("parking")).strip() or nm,
+        "soloFriendly": nm,
+        "groupFriendly": nm,
+        "dateFriendly": nm,
+        "foreignerAccess": _str(pi_old.get("foreignerAccess")).strip() or nm,
+        "orderingDifficulty": nm,
+        "englishMenu": nm,
+        "bestTimeToVisit": best_time,
+    }
+    menus = kd.get("mustTryMenus") if isinstance(kd.get("mustTryMenus"), list) else []
+    kd["foodSignals"] = {
+        "mentionedMenus": [str(x).strip() for x in menus if str(x).strip()][:12],
+        "tastePattern": nm,
+        "portionValuePattern": nm,
+    }
+    kd["alternativeRecommendation"] = {
+        "shouldRecommend": label in ("CAUTION", "AVOID"),
+        "reason": "Legacy cache: enable alternatives when decision is CAUTION/AVOID.",
+        "alternativeQuery": {
+            "sameArea": True,
+            "sameCategory": True,
+            "maxDistanceMeters": 800,
+            "preferredLowerRisks": ["waiting", "hygiene", "service"],
+        },
+    }
+    urc = 0
+    ss = kd.get("sourceStats") if isinstance(kd.get("sourceStats"), dict) else {}
     try:
-        ep = int(round(float(out.get("eventProbability", 0))))
+        urc = int(ss.get("usedReviewCount") or 0)
     except (TypeError, ValueError):
-        ep = 0
-    out["eventProbability"] = max(0, min(100, ep))
+        urc = 0
+    kd["confidence"] = {
+        "level": "low" if dc in ("insufficient", "low") else ("medium" if dc == "medium" else "high"),
+        "reason": _str(kd.get("confidenceReason")).strip() or nm,
+        "usedReviewCount": urc,
+        "dataLimitations": ["Legacy cached analysis shape; some fields inferred."],
+    }
+    kd["analysisStatus"] = "advanced_verified"
+    kd["displayMode"] = "VERIFIED_ADVANCED"
+    kd["legacyAdvancedKakao"] = True
+    return kd
 
-    raw_details = out.get("details")
-    if not isinstance(raw_details, dict):
-        raw_details = {}
 
-    def _axis(key: str, default: float) -> float:
+def _confidence_sort_key(level: str | None) -> int:
+    s = (level or "").strip().lower()
+    if s == "high":
+        return 3
+    if s == "medium":
+        return 2
+    if s == "low":
+        return 1
+    return 0
+
+
+def _used_review_count_from_kr(kr: dict) -> int:
+    si = kr.get("sourceInfo") if isinstance(kr.get("sourceInfo"), dict) else {}
+    try:
+        u = int(si.get("usedReviewCount"))
+        if u > 0:
+            return u
+    except (TypeError, ValueError):
+        pass
+    cf = kr.get("confidence") if isinstance(kr.get("confidence"), dict) else {}
+    try:
+        return int(cf.get("usedReviewCount") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _visit_safety_from_kr(kr: dict) -> float | None:
+    dec = kr.get("decision") if isinstance(kr.get("decision"), dict) else {}
+    v = dec.get("visitSafetyScore")
+    if v is None:
         try:
-            v = float(raw_details.get(key, default))
+            return float(kr.get("realScore")) if kr.get("realScore") is not None else None
         except (TypeError, ValueError):
-            v = default
-        return max(1.0, min(5.0, v))
+            return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
-    out["details"] = {
-        "taste": _axis("taste", 2.75),
-        "value": _axis("value", 2.75),
-        "service": _axis("service", 3.0),
-        "time": _axis("time", 3.0),
-        "hygiene": _axis("hygiene", 3.0),
+
+def _is_verified_advanced_row(kr: dict) -> bool:
+    if not isinstance(kr, dict):
+        return False
+    if kr.get("analysisStatus") == "advanced_unavailable":
+        return False
+    if kr.get("analysisStatus") == "advanced_verified":
+        return kr.get("status") in ("ok", None, "")
+    if kr.get("status") == "ok":
+        return True
+    return False
+
+
+def ensure_kakao_advanced_envelope(kd: dict, *, lang: str) -> dict:
+    """DB에 저장된 카카오 결과에 analysisStatus / displayMode / sourceInfo를 보강한다."""
+    if not isinstance(kd, dict):
+        return kd
+    st = kd.get("status")
+    if st == "ok" and kd.get("analysisStatus") not in ("advanced_unavailable",):
+        kd["analysisStatus"] = kd.get("analysisStatus") or "advanced_verified"
+        kd["displayMode"] = kd.get("displayMode") or "VERIFIED_ADVANCED"
+    elif st == "insufficient_reviews":
+        kd["analysisStatus"] = "advanced_unavailable"
+        kd["displayMode"] = "LIMITED_SCAN"
+    elif st in ("error", "no_data"):
+        kd["analysisStatus"] = kd.get("analysisStatus") or "advanced_unavailable"
+        kd["displayMode"] = kd.get("displayMode") or "LIMITED_SCAN"
+
+    if kd.get("sourceInfo") is None or not isinstance(kd.get("sourceInfo"), dict):
+        ss = kd.get("sourceStats") if isinstance(kd.get("sourceStats"), dict) else {}
+        cf = kd.get("confidence") if isinstance(kd.get("confidence"), dict) else {}
+        try:
+            used_ct = int(ss.get("usedReviewCount") or cf.get("usedReviewCount") or 0)
+        except (TypeError, ValueError):
+            used_ct = 0
+        kd["sourceInfo"] = {
+            "kakaoPlaceName": kd.get("kakaoPlaceName") or kd.get("kakao_matched_name"),
+            "kakaoPlaceUrl": kd.get("kakaoPlaceUrl") or ss.get("kakaoPlaceUrl"),
+            "kakaoAverageRating": kd.get("kakaoAverageRating") if kd.get("kakaoAverageRating") is not None else ss.get("kakaoAverageRating"),
+            "kakaoTotalReviewCount": kd.get("kakaoTotalReviewCount")
+            if kd.get("kakaoTotalReviewCount") is not None
+            else ss.get("kakaoTotalReviewCount"),
+            "rawReviewCount": ss.get("rawReviewCount", kd.get("rawReviewCount")),
+            "usefulReviewCount": ss.get("usefulReviewCount", kd.get("usefulReviewCount")),
+            "usedReviewCount": used_ct,
+            "lastAnalyzedAt": kd.get("lastAnalyzedAt") or "",
+        }
+    return kd
+
+
+def build_advanced_unavailable_payload(
+    lang: str,
+    *,
+    place_name: str,
+    address: str | None,
+    google_rating: float | None = None,
+    google_review_count: int | None = None,
+    mongo_status: str = "insufficient_reviews",
+    short_reason_override: str | None = None,
+    data_limitations_extra: list[str] | None = None,
+) -> dict:
+    """심층 카카오 분석을 마치지 못했을 때 클라이언트/DB 공통 형태."""
+    is_ko = lang != "en"
+    note = (
+        "이 정보는 제한적인 장소 확인용이며, 방문 판단에는 충분하지 않습니다."
+        if is_ko
+        else "This information is limited place-confirmation data and is not enough for a full visit decision."
+    )
+    one_line = "심층 검증을 완료할 수 없습니다." if is_ko else "Advanced verification could not be completed."
+    default_short = (
+        "카카오맵 리뷰 접근이 제한되었거나, 유효 리뷰 수가 부족합니다."
+        if is_ko
+        else "Kakao reviews may be unavailable, restricted, or insufficient."
+    )
+    short = (short_reason_override or "").strip() or default_short
+    dl = [
+        "Google review sample is too small for reliable judgment",
+        "Kakao advanced review analysis unavailable",
+    ]
+    if data_limitations_extra:
+        dl.extend([str(x) for x in data_limitations_extra if str(x).strip()])
+
+    gr: float | None = None
+    if google_rating is not None:
+        try:
+            gr = float(google_rating)
+        except (TypeError, ValueError):
+            gr = None
+    gct: int | None = None
+    if google_review_count is not None:
+        try:
+            gct = int(google_review_count)
+        except (TypeError, ValueError):
+            gct = None
+
+    st = mongo_status if mongo_status in ("insufficient_reviews", "error", "no_data") else "insufficient_reviews"
+    nm = "Not mentioned in reviews."
+    return {
+        "status": st,
+        "analysisStatus": "advanced_unavailable",
+        "displayMode": "LIMITED_SCAN",
+        "decision": {
+            "label": "INSUFFICIENT_DATA",
+            "visitSafetyScore": None,
+            "oneLine": one_line,
+            "shortReason": short[:500],
+        },
+        "limitedInfo": {
+            "placeName": (place_name or "").strip(),
+            "address": (address or "").strip() or None,
+            "googleRating": gr,
+            "googleReviewCount": gct,
+            "note": note,
+        },
+        "confidence": {
+            "level": "low",
+            "reason": (
+                "고급 분석에 필요한 유효 리뷰가 부족하거나 접근할 수 없습니다."
+                if is_ko
+                else "Not enough accessible useful reviews for advanced analysis."
+            ),
+            "usedReviewCount": 0,
+            "dataLimitations": dl[:12],
+        },
+        "whoShouldGo": [],
+        "whoShouldAvoid": [],
+        "mustKnowBeforeGoing": [],
+        "riskFlags": [],
+        "practicalInfo": {
+            "waiting": nm,
+            "parking": nm,
+            "soloFriendly": nm,
+            "groupFriendly": nm,
+            "dateFriendly": nm,
+            "foreignerAccess": nm,
+            "orderingDifficulty": nm,
+            "englishMenu": nm,
+            "bestTimeToVisit": nm,
+        },
+        "foodSignals": {"mentionedMenus": [], "tastePattern": nm, "portionValuePattern": nm},
+        "alternativeRecommendation": {
+            "shouldRecommend": False,
+            "reason": nm,
+            "alternativeQuery": {
+                "sameArea": True,
+                "sameCategory": True,
+                "maxDistanceMeters": 800,
+                "preferredLowerRisks": ["waiting", "hygiene"],
+            },
+        },
+        "nearbySaferAlternatives": [],
+        "realScore": 2.5,
+        "eventProbability": 0,
+        "aiSummary": f"[Limited] {one_line}\n{short}".strip(),
     }
 
-    tag_keys = ("mustTryMenus", "vibeTags", "riskFlags")
-    if mode == "deep":
-        for k in tag_keys:
-            v = out.get(k)
-            if not isinstance(v, list):
-                v = []
-            # 문자열만 남기기(비문자면 제거/문자열화 최소)
-            cleaned: list[str] = []
-            for it in v:
-                if it is None:
+
+def _purpose_matches_advanced_row(kr: dict, purpose: str | None) -> bool:
+    if not purpose or not str(purpose).strip():
+        return True
+    p = str(purpose).strip().lower()
+    dec = kr.get("decision") if isinstance(kr.get("decision"), dict) else {}
+    lbl = str(dec.get("label") or "").strip().upper()
+    pi = kr.get("practicalInfo") if isinstance(kr.get("practicalInfo"), dict) else {}
+    risks = kr.get("riskFlags") if isinstance(kr.get("riskFlags"), list) else []
+
+    def _txt(key: str) -> str:
+        return str(pi.get(key) or "").strip().lower()
+
+    def _has_high_risk() -> bool:
+        for it in risks:
+            if isinstance(it, dict) and str(it.get("level") or "").strip().lower() == "high":
+                return True
+        return False
+
+    if p == "lowrisk":
+        return lbl in ("GO", "OK") and not _has_high_risk()
+    if p == "foreignerfriendly":
+        fx = _txt("foreigneraccess")
+        return fx and "not mentioned" not in fx and "어렵" not in fx and "difficult" not in fx
+    if p == "quickmeal":
+        w = _txt("waiting")
+        return w and all(x not in w for x in ("long", "2시간", "3시간", "긴 대기", "hours"))
+    if p in ("solo", "date", "group"):
+        key = {"solo": "solofriendly", "date": "datefriendly", "group": "groupfriendly"}[p]
+        s = _txt(key)
+        return bool(s) and "not mentioned" not in s
+    return True
+
+
+def _area_row_matches(
+    aa: dict,
+    *,
+    sido: str | None,
+    gugun: str | None,
+    dong: str | None,
+    area_query: str | None,
+) -> bool:
+    if not (sido or gugun or dong or area_query):
+        return True
+    if area_query and str(area_query).strip():
+        q = str(area_query).strip()
+        blob = " ".join(
+            str(aa.get(k) or "")
+            for k in ("sido", "gugun", "dong")
+        )
+        if q in blob or q in blob.replace(" ", ""):
+            return True
+        return False
+    if gugun and str(aa.get("gugun") or "").strip() == str(gugun).strip():
+        return True
+    if dong and str(aa.get("dong") or "").strip() == str(dong).strip():
+        return True
+    if sido and str(aa.get("sido") or "").strip() == str(sido).strip() and not (gugun or dong):
+        return True
+    return False
+
+
+def query_verified_advanced_places(
+    lang: str,
+    *,
+    sido: str | None = None,
+    gugun: str | None = None,
+    dong: str | None = None,
+    area_query: str | None = None,
+    category: str | None = None,
+    purpose: str | None = None,
+    limit: int = 40,
+) -> list[dict]:
+    """사전 계산된 카카오 심층(analysisStatus=advanced_verified 또는 레거시 ok)만."""
+    key = f"kakao_result_{lang}"
+    if collection is None:
+        return []
+    filt: dict = {
+        key: {"$exists": True},
+        f"{key}.status": "ok",
+        f"{key}.analysisStatus": {"$ne": "advanced_unavailable"},
+    }
+    try:
+        docs = list(collection.find(filt, {"name": 1, "address": 1, key: 1}).limit(500))
+    except Exception as e:
+        print(f"🚨 query_verified_advanced_places: {e}")
+        return []
+
+    cat_q = (category or "").strip().lower()
+    out: list[dict] = []
+    for doc in docs:
+        kr = doc.get(key)
+        if not isinstance(kr, dict):
+            continue
+        ensure_kakao_advanced_envelope(kr, lang=lang)
+        if kr.get("analysisStatus") == "advanced_unavailable":
+            continue
+        if kr.get("analysisStatus") not in (None, "", "advanced_verified"):
+            continue
+        idx = kr.get("alternativesIndex") if isinstance(kr.get("alternativesIndex"), dict) else {}
+        aa = idx.get("analysisArea") if isinstance(idx.get("analysisArea"), dict) else {}
+        if not _area_row_matches(
+            aa, sido=sido, gugun=gugun, dong=dong, area_query=area_query
+        ):
+            continue
+        if cat_q:
+            pl = str(idx.get("primaryLabelEn") or "").strip().lower()
+            pid = str(idx.get("primaryCategoryId") or "").strip().lower()
+            if cat_q not in pl and cat_q not in pid and cat_q not in (pl.replace(" ", ""),):
+                blob = json.dumps(idx, ensure_ascii=False).lower()
+                if cat_q not in blob:
                     continue
-                if isinstance(it, str):
-                    s = it.strip()
-                    if s:
-                        cleaned.append(s)
-                    continue
-                try:
-                    s = str(it).strip()
-                except Exception:
-                    s = ""
-                if s:
-                    cleaned.append(s)
-            out[k] = cleaned
-    else:
-        for k in tag_keys:
-            if k in out and not isinstance(out[k], list):
-                out[k] = []
-
-    out["aiSummary"] = _str_safe(out.get("aiSummary"))
-    if mode == "deep":
-        out["romanizedName"] = _str_safe(out.get("romanizedName"))
-    elif "romanizedName" in out:
-        out["romanizedName"] = _str_safe(out.get("romanizedName"))
-
-    # --- Deep pipeline metadata (server will overwrite final values) ---
-    dc_raw = out.get("dataConfidence")
-    dc = _str_safe(dc_raw).strip()
-    if dc not in ("insufficient", "low", "medium", "high"):
-        # 서버 계산값으로 덮어쓸 수 있도록 빈 문자열로 정규화
-        dc = ""
-    out["dataConfidence"] = dc
-
-    out["confidenceReason"] = _str_safe(out.get("confidenceReason")).strip()
-
-    if mode == "fast":
-        sm = _str_safe(out.get("scoreMeaning")).strip()
-        if sm != "review_risk_screening":
-            out["scoreMeaning"] = "review_risk_screening"
-        # TODO(frontend): 기본(fast) `realScore`를 맛집·음질 점수처럼 크게 노출하지 말 것.
-        # - `scoreMeaning === "review_risk_screening"`일 때는 '구글 스니펫 기반 1차 리스크 참고' 카피를 권장.
-        # - 맛집 판정 UI는 고급(Kakao 심층) 결과 위주로 설계.
-
-    for k in ("sourceStats", "reviewPatternStats", "reviewerSignals"):
-        v = out.get(k)
-        out[k] = v if isinstance(v, dict) else {}
-
-    # practicalInfo: dict 강제 + 키 기본값 채우기
-    nm = "리뷰상 확인 불가(Not mentioned)"
-    pi = out.get("practicalInfo")
-    if not isinstance(pi, dict):
-        pi = {}
-    for key in ("parking", "waiting", "bestTime", "foreignerAccess"):
-        v = pi.get(key)
-        s = _str_safe(v).strip()
-        pi[key] = s if s else nm
-    out["practicalInfo"] = pi
-
+        if not _purpose_matches_advanced_row(kr, purpose):
+            continue
+        dec = kr.get("decision") if isinstance(kr.get("decision"), dict) else {}
+        cf = kr.get("confidence") if isinstance(kr.get("confidence"), dict) else {}
+        risks = kr.get("riskFlags") if isinstance(kr.get("riskFlags"), list) else []
+        top_risks = []
+        for it in risks[:6]:
+            if isinstance(it, dict):
+                top_risks.append(
+                    {
+                        "type": it.get("type"),
+                        "level": it.get("level"),
+                        "reason": (str(it.get("reason") or "")[:180]),
+                    }
+                )
+        si = kr.get("sourceInfo") if isinstance(kr.get("sourceInfo"), dict) else {}
+        out.append(
+            {
+                "name": doc.get("name") or "",
+                "address": doc.get("address") or "",
+                "area": {
+                    "sido": aa.get("sido") or "",
+                    "gugun": aa.get("gugun") or "",
+                    "dong": aa.get("dong") or "",
+                },
+                "category": {
+                    "id": idx.get("primaryCategoryId"),
+                    "labelEn": idx.get("primaryLabelEn"),
+                },
+                "decision": {
+                    "label": dec.get("label"),
+                    "visitSafetyScore": dec.get("visitSafetyScore"),
+                    "oneLine": dec.get("oneLine"),
+                },
+                "confidence": {
+                    "level": cf.get("level"),
+                    "reason": cf.get("reason"),
+                },
+                "usedReviewCount": _used_review_count_from_kr(kr),
+                "topRiskFlags": top_risks,
+                "foreignerAccessHint": (kr.get("practicalInfo") or {}).get("foreignerAccess")
+                if isinstance(kr.get("practicalInfo"), dict)
+                else None,
+                "analysisStatus": kr.get("analysisStatus") or "advanced_verified",
+                "displayMode": kr.get("displayMode") or "VERIFIED_ADVANCED",
+                "lastAnalyzedAt": kr.get("lastAnalyzedAt") or si.get("lastAnalyzedAt"),
+            }
+        )
+        if len(out) >= max(1, min(120, int(limit or 40))):
+            break
     return out
+
+
+def find_nearby_alternatives(current_place: dict, lang: str, *, limit: int = 3) -> list[dict]:
+    """
+    Safer nearby picks from precomputed Kakao advanced rows in MongoDB.
+    current_place expects:
+      visitSafetyScore, mongo_name, analysis_area {sido,gugun,dong},
+      geo {lat,lon} optional, primary_category_id, primary_label_en,
+      alternativeQuery (optional dict from model).
+    """
+    if collection is None:
+        return []
+    key = f"kakao_result_{lang}"
+    cur_vss: float | None = None
+    cur_has_score = False
+    raw_cur = current_place.get("visitSafetyScore")
+    if raw_cur is not None:
+        try:
+            cur_vss = float(raw_cur)
+            cur_has_score = True
+        except (TypeError, ValueError):
+            cur_vss = None
+            cur_has_score = False
+
+    aq = current_place.get("alternativeQuery") if isinstance(current_place.get("alternativeQuery"), dict) else {}
+    try:
+        max_dist = float(aq.get("maxDistanceMeters") if aq.get("maxDistanceMeters") is not None else 800.0)
+    except (TypeError, ValueError):
+        max_dist = 800.0
+    same_area = bool(aq.get("sameArea", True))
+    same_cat = bool(aq.get("sameCategory", True))
+    ignored = (current_place.get("mongo_name") or "").strip()
+    my_area = current_place.get("analysis_area") if isinstance(current_place.get("analysis_area"), dict) else {}
+    my_geo = current_place.get("geo") if isinstance(current_place.get("geo"), dict) else {}
+    try:
+        my_lat = float(my_geo["lat"]) if my_geo.get("lat") is not None else None
+    except (TypeError, ValueError, KeyError):
+        my_lat = None
+    try:
+        my_lon = float(my_geo["lon"]) if my_geo.get("lon") is not None else None
+    except (TypeError, ValueError, KeyError):
+        my_lon = None
+    cat_id = (current_place.get("primary_category_id") or "").strip() or None
+    label_en = (current_place.get("primary_label_en") or "").strip() or None
+
+    filt: dict = {
+        key: {"$exists": True},
+        f"{key}.status": "ok",
+        f"{key}.decision.label": {"$in": ["GO", "OK"]},
+    }
+    if ignored:
+        filt["name"] = {"$ne": ignored}
+
+    try:
+        docs = list(collection.find(filt, {"name": 1, "address": 1, key: 1}).limit(450))
+    except Exception as e:
+        print(f"🚨 find_nearby_alternatives query error: {e}")
+        return []
+
+    def area_ok(doc: dict) -> bool:
+        if not same_area:
+            return True
+        if not (my_area.get("gugun") or "").strip() and not (my_area.get("dong") or "").strip() and not (
+            my_area.get("sido") or ""
+        ).strip():
+            return True
+        kr = doc.get(key) or {}
+        idx = kr.get("alternativesIndex") if isinstance(kr.get("alternativesIndex"), dict) else {}
+        a = idx.get("analysisArea") if isinstance(idx.get("analysisArea"), dict) else {}
+        if my_area.get("gugun") and my_area.get("gugun") == a.get("gugun"):
+            return True
+        if my_area.get("dong") and my_area.get("dong") == a.get("dong"):
+            return True
+        if my_area.get("sido") and my_area.get("sido") == a.get("sido") and not (my_area.get("gugun") or "").strip():
+            return True
+        g = idx.get("geo") if isinstance(idx.get("geo"), dict) else {}
+        try:
+            lat2 = float(g.get("lat")) if g.get("lat") is not None else None
+            lon2 = float(g.get("lon")) if g.get("lon") is not None else None
+        except (TypeError, ValueError):
+            lat2 = lon2 = None
+        if (
+            my_lat is not None
+            and my_lon is not None
+            and lat2 is not None
+            and lon2 is not None
+            and _haversine_m(my_lat, my_lon, lat2, lon2) <= max_dist
+        ):
+            return True
+        return False
+
+    def cat_ok(doc: dict) -> bool:
+        if not same_cat:
+            return True
+        if not cat_id and not label_en:
+            return True
+        kr = doc.get(key) or {}
+        idx = kr.get("alternativesIndex") if isinstance(kr.get("alternativesIndex"), dict) else {}
+        oc = (idx.get("primaryCategoryId") or "").strip() or None
+        ol = (idx.get("primaryLabelEn") or "").strip() or None
+        if cat_id and oc == cat_id:
+            return True
+        if label_en and ol and label_en.strip().lower() == ol.strip().lower():
+            return True
+        if not oc and not ol:
+            return False
+        return False
+
+    scored: list[tuple[tuple, dict]] = []
+    for doc in docs:
+        kr = doc.get(key) or {}
+        if not isinstance(kr, dict):
+            continue
+        ensure_kakao_advanced_envelope(kr, lang=lang)
+        if not _is_verified_advanced_row(kr):
+            continue
+        if not area_ok(doc):
+            continue
+        if not cat_ok(doc):
+            continue
+        dec = kr.get("decision") if isinstance(kr.get("decision"), dict) else {}
+        cf = kr.get("confidence") if isinstance(kr.get("confidence"), dict) else {}
+        conf_level = (cf.get("level") or "").strip().lower()
+        if conf_level == "low":
+            continue
+        urc = _used_review_count_from_kr(kr)
+        if urc < 10:
+            continue
+        vss = _visit_safety_from_kr(kr)
+        if cur_has_score and cur_vss is not None:
+            if vss is None:
+                continue
+            if not (vss > cur_vss):
+                continue
+        rp = kr.get("reviewPatternStats") if isinstance(kr.get("reviewPatternStats"), dict) else {}
+        rrel = _review_reliability_score(rp, urc)
+        wr = _waiting_risk_score_from_flags(kr.get("riskFlags"))
+        idx = kr.get("alternativesIndex") if isinstance(kr.get("alternativesIndex"), dict) else {}
+        g = idx.get("geo") if isinstance(idx.get("geo"), dict) else {}
+        dist = 9e12
+        try:
+            lat2 = float(g.get("lat")) if g.get("lat") is not None else None
+            lon2 = float(g.get("lon")) if g.get("lon") is not None else None
+        except (TypeError, ValueError):
+            lat2 = lon2 = None
+        if my_lat is not None and my_lon is not None and lat2 is not None and lon2 is not None:
+            dist = _haversine_m(my_lat, my_lon, lat2, lon2)
+        vss_sort = -(vss if vss is not None else -1e12)
+        conf_key = _confidence_sort_key(cf.get("level"))
+        sort_key = (vss_sort, -conf_key, dist, wr)
+        scored.append(
+            (
+                sort_key,
+                {
+                    "name": doc.get("name") or "",
+                    "address": doc.get("address") or "",
+                    "visitSafetyScore": vss,
+                    "decisionLabel": dec.get("label"),
+                    "confidenceLevel": cf.get("level"),
+                    "oneLine": (dec.get("oneLine") or "")[:300],
+                    "distanceMeters": None if dist >= 9e11 else round(float(dist), 1),
+                    "reviewReliabilityScore": round(float(rrel), 4),
+                    "waitingRiskScore": float(wr),
+                },
+            )
+        )
+
+    scored.sort(key=lambda x: x[0])
+    return [x[1] for x in scored[:limit]]
 
 
 def attach_tags_and_plan_b(
@@ -888,33 +1458,60 @@ def get_deep_prompt(
     n = int(review_count) if review_count is not None else (len(reviews) if reviews else 0)
     sec = _PROMPT_SECURITY_EN if lang == "en" else _PROMPT_SECURITY_KO
 
-    # NOTE: server-calculated metadata MUST be treated as given signals.
-    # The model must not invent or override these values.
     common_rules = """
         [Technical — output MUST be valid JSON only]
         - Return EXACTLY one JSON object. No markdown, no code fences, no extra text.
-        - Include ALL required keys.
-
-        [Scores]
-        - realScore: float 1.0–5.0.
-        - eventProbability: int 0–100.
-        - details.taste/value/service/time/hygiene: floats 1.0–5.0 (taste/value must NEVER be 0.0).
-        - If evidence is thin, keep taste/value around 2.5–3.0 conservatively.
+        - Include ALL required keys shown in the schema example.
+        - Use ONLY the provided Kakao review texts as factual evidence. Do not invent facts.
+        - If something is not supported by the reviews, write exactly: "Not mentioned in reviews." for that field or sub-field.
+        - You are not a food critic and not a marketing copywriter. Output a practical decision card, not a long essay.
+        - Do not overreact to one or two isolated negative reviews; weight repeated patterns across reviews.
+        - Lower confidence.level when usefulReviewCount (from signals) is low or reviews contradict each other.
 
         [romanizedName]
-        - romanizedName MUST be the venue name in Revised Romanization (e.g., 감자탕 -> Gamjatang).
-        - Do NOT write an English translation like "Spicy Pork Bone Stew" in romanizedName.
+        - romanizedName MUST be the venue name in Revised Romanization (e.g., 감자탕 house -> Gamjatang).
+        - Do NOT put English menu descriptions in romanizedName.
 
-        [Arrays]
-        - mustTryMenus: 0–3 strings. Only if explicitly praised in reviews; otherwise [].
-        - vibeTags: array of short labels, evidence-based; otherwise [].
-        - riskFlags: array of short labels, evidence-based; otherwise [].
+        [Also include for charts / compatibility]
+        - eventProbability: int 0–100 (promo/manipulation wording in reviews only; see eventProbability rules).
+        - details.taste/value/service/time/hygiene: floats 1.0–5.0 (taste/value never 0.0).
+        - mustTryMenus: 0–3 strings, only if explicitly praised; else [].
+        - vibeTags: short evidence-based labels; else [].
 
-        [practicalInfo]
-        - practicalInfo MUST be a JSON object with keys: parking, waiting, bestTime, foreignerAccess.
-        - If evidence is missing for any field, use exactly: "리뷰상 확인 불가(Not mentioned)".
+        [decision]
+        - decision.label must be one of: GO | OK | CAUTION | AVOID | INSUFFICIENT_DATA
+        - decision.visitSafetyScore: number 1.0–5.0 (practical "visit safety / disappointment risk" for a short trip; NOT hype).
+        - decision.oneLine: max ~120 chars, plain and practical.
+        - decision.shortReason: max ~240 chars, evidence-led.
 
-        WARNING: The numeric values inside the JSON format example (e.g., 3.8, 2.75) are just structural placeholders. NEVER copy them. You MUST calculate actual scores based on the review text.
+        [riskFlags]
+        - Array of objects: { "type", "level", "reason" }
+        - type must be one of: waiting | service | hygiene | price | taste | ordering | crowding | tourist_trap | data_limit
+        - level: high | medium | low
+
+        [mustKnowBeforeGoing]
+        - Up to 6 items: { "point", "evidence", "importance" } with importance high|medium|low
+
+        [practicalInfo — all strings; use "Not mentioned in reviews." if unknown]
+        - waiting, parking, soloFriendly, groupFriendly, dateFriendly, foreignerAccess,
+          orderingDifficulty, englishMenu, bestTimeToVisit
+
+        [foodSignals]
+        - mentionedMenus: up to 8 menu names explicitly referenced in reviews
+        - tastePattern, portionValuePattern: short; "Not mentioned in reviews." if unsupported
+
+        [alternativeRecommendation]
+        - shouldRecommend: true if decision.label is CAUTION or AVOID (suggest looking elsewhere), else false
+        - reason: short
+        - alternativeQuery: sameArea bool, sameCategory bool, maxDistanceMeters (200–1500), preferredLowerRisks string array
+
+        [confidence]
+        - confidence.level: high | medium | low (align with evidence volume and agreement)
+        - confidence.reason: short
+        - confidence.usedReviewCount: set to the integer provided as USED_REVIEW_COUNT_HINT (do not invent a different number).
+        - confidence.dataLimitations: string array (empty if none)
+
+        WARNING: Numbers in the JSON example are placeholders only. Never copy them blindly—derive from review evidence.
     """
     if lang == "en":
         core = f"""
@@ -924,62 +1521,51 @@ def get_deep_prompt(
         {common_rules}
         """
         instruction = (
-            "You are an evidence-based local dining analyst for foreigners visiting Korea. "
-            "You are not a food critic and not a marketing copywriter. "
-            "Use Kakao local reviews plus the provided source statistics, review quality signals, and aggregated reviewer signals "
-            "to help users decide whether this place is worth visiting."
+            "You are ZzinView's Local Dining Decision Analyst.\n"
+            "Your role is not to write a generic restaurant review.\n"
+            "Your role is to help a foreign traveler decide whether this restaurant is worth visiting during a limited trip in Korea.\n"
+            "Use only the provided Kakao review data, source stats, and reviewer signals.\n"
+            "Do not invent facts.\n"
+            "Do not use outside knowledge.\n"
+            "Do not mention individual reviewers.\n"
+            "Do not expose personal information.\n"
+            'If a topic is not supported by the reviews, write "Not mentioned in reviews."\n'
+            "The user does not need vague praise.\n"
+            "The user needs practical decision-making information."
         )
         guidelines = (
             core
             + """
-        [Evidence priority]
-        1) Review text evidence is highest priority.
-        2) kakaoAverageRating / kakaoTotalReviewCount are signals, not truth; never override review evidence.
-        3) reviewerSignals and reviewPatternStats are anonymized signals only; do NOT claim manipulation, do NOT name any reviewer.
+        Focus on:
+        - repeated complaints
+        - waiting time
+        - service attitude
+        - hygiene concerns
+        - price/value mismatch
+        - menu satisfaction
+        - portion size
+        - ordering difficulty
+        - foreigner accessibility
+        - solo/group/date suitability
+        - whether the place is safe for a limited travel schedule
+        - whether nearby alternatives should be recommended
 
-        [Score interpretation — deep analysis ONLY]
-        - realScore reflects visit worth grounded in Kakao review text—this is not copying the platform star average.
-        - kakaoAverageRating and usefulReviewCount are confidence/baseline reference signals only.
-        - What matters for the final judgment is what repeats in the reviews: recommended dishes, taste satisfaction, value, service, waits, hygiene, and practical visit cues.
+        Do not overreact to one or two isolated negative reviews.
+        Look for repeated patterns.
+        If evidence is weak, clearly lower confidence.
 
-        Guidance for realScore bands (soft guide, not rigid rules):
-        - 4.0–5.0: Multiple substantive reviews strongly repeat praise for specific menu/taste/satisfaction, and no grave recurring risks show up in the text.
-        - 3.5–3.9: Generally safe and worthwhile; positives outweigh negatives though waits/price frustrations may appear—express those via practicalInfo/riskFlags rather than slashing the headline score.
-        - 3.0–3.4: Middling or mixed; some upsides but not enough for a strong recommendation.
-        - 2.5–2.9: Thin evidence, few reviews, or mixed signals that make it hard to judge confidently.
-        - Below 2.5: Reserve for clear, repeated serious issues (hygiene failures, severe hostility, spoiled food, repeated quality complaints) documented in review text.
+        Decision labels:
+        - GO: Strong enough to recommend
+        - OK: Generally safe but not special
+        - CAUTION: Some repeated risks; alternatives may be better
+        - AVOID: Repeated serious risks
+        - INSUFFICIENT_DATA: Not enough useful reviews
 
-        Important:
-        - Do NOT deeply cut realScore for long waits, high prices, or parking hassle alone—capture them in practicalInfo and riskFlags instead.
-        - If the platform average is high and usefulReviewCount is solid but you assign a low realScore, you must point to explicit negative evidence in the review text.
-        - If reviews are detailed and broadly positive, reflect that naturally in realScore.
-        - When platform ratings and review narrative conflict, prefer the review narrative.
+        visitSafetyScore should reflect whether a traveler is likely to regret visiting.
+        It is not just a taste score.
 
-        [Data-confidence tone control]
-        - dataConfidence == "low": avoid strong recommendations. Use careful hedging ("With limited data...", "Some reviewers report...").
-        - dataConfidence == "medium": normal analysis, still avoid overconfidence.
-        - dataConfidence == "high": more stable, still never invent facts.
-        - dataConfidence == "insufficient": refuse/decline analysis tone (but still output JSON).
-
-        [aiSummary format — one string with 3 blocks]
-        1) [🔍 Insight] evidence-based judgment on menu/taste/vibe/service.
-           - If not mentioned, write exactly: "리뷰상 확인 불가(Not mentioned)".
-        2) [💡 Practical note] waiting/parking/best time/foreigner access (evidence-based only).
-        3) [📊 Reliability] short explanation using usefulReviewCount, usedReviewCount, dataConfidence, and reviewPatternStats.
-
-        [Privacy]
-        - Never mention any individual reviewer, nickname, profile, or identifier.
-        - If reviewerSignals are strong enough (reviewerMetaCoverageRatio is not too low), you may add ONE anonymized sentence like
-          "Some more experienced reviewers’ concrete comments are included, which slightly improves reliability."
+        Output valid JSON only.
         """
-        )
-        json_format = (
-            '{ "realScore": 3.8, "eventProbability": 0, "dataConfidence": "low", "confidenceReason": "", '
-            '"romanizedName": "", "aiSummary": "", '
-            '"details": { "taste": 2.75, "value": 2.75, "service": 3.0, "time": 3.0, "hygiene": 3.0 }, '
-            '"mustTryMenus": [], "vibeTags": [], "riskFlags": [], '
-            '"practicalInfo": { "parking": "리뷰상 확인 불가(Not mentioned)", "waiting": "리뷰상 확인 불가(Not mentioned)", '
-            '"bestTime": "리뷰상 확인 불가(Not mentioned)", "foreignerAccess": "리뷰상 확인 불가(Not mentioned)" } }'
         )
     else:
         core = f"""
@@ -989,85 +1575,95 @@ def get_deep_prompt(
         {common_rules}
         """
         instruction = (
-            "당신은 미식가나 광고 문구 작성자가 아니라, 한국을 방문한 외국인을 위한 근거 기반 로컬 식사 판단관입니다. "
-            "카카오 로컬 리뷰, 수집 통계, 리뷰 품질 신호, 익명화된 리뷰어 집계 신호를 바탕으로 "
-            "이 식당을 실제로 방문해도 되는지 판단할 수 있게 돕습니다."
+            "당신은 ZzinView의 Local Dining Decision Analyst(로컬 식사 결정 분석가)입니다.\n"
+            "일반적인 맛집 홍보 글을 쓰는 역할이 아닙니다.\n"
+            "한국에서 일정이 촉박한 외국인 여행자가 이 식당에 방문할 가치가 있는지 결정하도록 돕는 역할입니다.\n"
+            "오직 제공된 카카오 리뷰 데이터, 출처 통계, 리뷰어 시그널만 사용합니다.\n"
+            "사실을 지어내지 마세요.\n"
+            "외부 지식을 사용하지 마세요.\n"
+            "개별 리뷰어를 언급하거나 개인정보를 노출하지 마세요.\n"
+            '리뷰에서 뒷받침되지 않는 주제는 "Not mentioned in reviews."로 작성하세요.\n'
+            "막연한 칭찬은 필요 없습니다.\n"
+            "실제 방문 결정에 필요한 실무 정보를 제공하세요."
         )
         guidelines = (
             core
             + """
-        [근거 우선순위]
-        1) 리뷰 본문 근거가 가장 중요하다.
-        2) kakaoAverageRating/kakaoTotalReviewCount는 참고 신호이며, 리뷰 근거와 충돌하면 리뷰 근거를 우선한다.
-        3) reviewerSignals/reviewPatternStats는 익명 집계 신호일 뿐이며 조작을 단정하지 마라.
+        집중할 내용:
+        - 반복 불만
+        - 웨이팅
+        - 서비스 태도
+        - 위생 우려
+        - 가격 대비 가치 불일치
+        - 메뉴 만족
+        - 양/퍼션
+        - 주문 난이도
+        - 외국인 접근성
+        - 혼밥/단체/데이트 적합성
+        - 짧은 여행 일정에서 방문이 안전한지
+        - 근처 대안을 제안해야 하는지
 
-        [점수 해석 — 고급 분석 전용]
+        1~2개의 편향된 악평에 과도하게 반응하지 마세요. 반복 패턴을 찾으세요.
+        근거가 약하면 confidence를 명확히 낮추세요.
 
-        - realScore는 카카오 리뷰 본문을 중심으로 판단하는 방문 가치 점수다.
-        - 카카오 평균 평점을 기계적으로 복사하지 마라.
-        - kakaoAverageRating과 usefulReviewCount는 신뢰도와 기준선 참고 신호로만 사용한다.
-        - 최종 근거는 반복적으로 나타나는 리뷰 내용이다: 추천 메뉴, 맛 만족도, 가격 대비 만족도, 서비스, 웨이팅, 위생, 방문 실전 정보.
+        decision.label:
+        - GO: 추천할 만큼 충분히 긍정적
+        - OK: 대체로 안전하지만 특별하진 않음
+        - CAUTION: 반복 리스크가 있어 대안이 나을 수 있음
+        - AVOID: 심각한 리스크가 반복
+        - INSUFFICIENT_DATA: 유용한 리뷰가 부족
 
-        점수 기준:
-        - 4.0~5.0: 여러 useful 리뷰에서 특정 메뉴/맛/만족도가 반복적으로 강하게 확인되고, 심각한 반복 리스크가 없는 경우.
-        - 3.5~3.9: 전반적으로 안전하고 방문 가치가 있는 경우. 긍정 근거가 부정 근거보다 강하지만 웨이팅/가격 같은 참고사항은 있을 수 있음.
-        - 3.0~3.4: 무난하거나 다소 혼합적인 경우. 장점은 있으나 강한 추천까지는 어려운 경우.
-        - 2.5~2.9: 근거가 약하거나 리뷰가 제한적이거나, 장단점이 섞여 확신하기 어려운 경우.
-        - 2.5 미만: 위생, 심각한 불친절, 상한 음식, 반복적 품질 불만처럼 명확한 심각 문제가 반복될 때만.
+        visitSafetyScore는 단순 맛 점수가 아니라, 여행자가 방문 후 후회할 가능성을 반영합니다.
 
-        중요:
-        - 긴 웨이팅, 비싼 가격, 주차 불편만으로 점수를 크게 낮추지 말고 practicalInfo/riskFlags로 분리한다.
-        - 카카오 평균 평점이 높고 usefulReviewCount가 충분한데도 낮은 점수를 줄 때는 반드시 리뷰 본문에 그럴 만한 명확한 근거가 있어야 한다.
-        - 리뷰 본문이 세세하고 전반적으로 긍정적이면 realScore에도 자연스럽게 반영한다.
-        - 평점과 리뷰 본문이 충돌하면 리뷰 본문을 우선한다.
-
-        [dataConfidence 톤 조절]
-        - low: 강한 추천 금지. "제한된 리뷰 기준", "일부 리뷰 기준", "아직 단정하기 어렵지만" 등 조심스러운 표현만.
-        - medium: 일반 분석 가능하나 과확신 금지.
-        - high: 비교적 안정적이나, 근거 없는 사실 생성 금지.
-        - insufficient: 원칙적으로 분석 거부 톤(그래도 JSON은 반환).
-
-        [aiSummary 형식 — 한 문자열에 3블록]
-        1) [🔍 심층 분석] 메뉴/맛/분위기/서비스를 **근거 기반**으로 판단.
-           - 근거가 없으면 반드시 "리뷰상 확인 불가(Not mentioned)".
-        2) [💡 실전 꿀팁] 웨이팅/주차/방문 시간/외국인 접근성(근거 있을 때만).
-        3) [📊 신뢰도] usefulReviewCount, usedReviewCount, dataConfidence, reviewPatternStats를 근거로 짧게 설명.
-
-        [익명화/개인정보]
-        - 개별 리뷰어/닉네임/프로필/식별자는 절대 언급하지 마라.
-        - reviewerMetaCoverageRatio가 충분히 높을 때에만,
-          "리뷰 경험이 많은 작성자들의 구체적 평가가 일부 포함되어 신뢰도가 비교적 높습니다" 같은 집계 표현 1문장만 허용.
+        출력은 반드시 유효한 JSON 하나만.
         """
         )
-        json_format = (
-            '{ "realScore": 3.8, "eventProbability": 0, "dataConfidence": "low", "confidenceReason": "", '
-            '"romanizedName": "", "aiSummary": "", '
-            '"details": { "taste": 2.75, "value": 2.75, "service": 3.0, "time": 3.0, "hygiene": 3.0 }, '
-            '"mustTryMenus": [], "vibeTags": [], "riskFlags": [], '
-            '"practicalInfo": { "parking": "리뷰상 확인 불가(Not mentioned)", "waiting": "리뷰상 확인 불가(Not mentioned)", '
-            '"bestTime": "리뷰상 확인 불가(Not mentioned)", "foreignerAccess": "리뷰상 확인 불가(Not mentioned)" } }'
-        )
+
+    used_hint = int(used_review_count) if used_review_count is not None else 0
+    json_format = (
+        '{ "romanizedName": "", "eventProbability": 0, "dataConfidence": "low", "confidenceReason": "", '
+        '"details": { "taste": 2.75, "value": 2.75, "service": 3.0, "time": 3.0, "hygiene": 3.0 }, '
+        '"mustTryMenus": [], "vibeTags": [], '
+        '"decision": { "label": "OK", "visitSafetyScore": 3.4, "oneLine": "", "shortReason": "" }, '
+        '"whoShouldGo": [], "whoShouldAvoid": [], '
+        '"mustKnowBeforeGoing": [], '
+        '"riskFlags": [ { "type": "waiting", "level": "medium", "reason": "" } ], '
+        '"practicalInfo": { '
+        '"waiting": "Not mentioned in reviews.", "parking": "Not mentioned in reviews.", '
+        '"soloFriendly": "Not mentioned in reviews.", "groupFriendly": "Not mentioned in reviews.", '
+        '"dateFriendly": "Not mentioned in reviews.", "foreignerAccess": "Not mentioned in reviews.", '
+        '"orderingDifficulty": "Not mentioned in reviews.", "englishMenu": "Not mentioned in reviews.", '
+        '"bestTimeToVisit": "Not mentioned in reviews." }, '
+        '"foodSignals": { "mentionedMenus": [], "tastePattern": "Not mentioned in reviews.", '
+        '"portionValuePattern": "Not mentioned in reviews." }, '
+        '"alternativeRecommendation": { '
+        '"shouldRecommend": false, "reason": "Not mentioned in reviews.", '
+        '"alternativeQuery": { "sameArea": true, "sameCategory": true, "maxDistanceMeters": 800, '
+        '"preferredLowerRisks": ["waiting","hygiene"] } }, '
+        '"confidence": { "level": "medium", "reason": "", "usedReviewCount": '
+        + str(used_hint)
+        + ', "dataLimitations": [] } }'
+    )
 
     sparse_block = ""
     if data_confidence in ("low", "insufficient"):
         if lang == "en":
             sparse_block = """
 [CAUTION — limited useful review data]
-You MUST avoid definitive language. Use careful hedging and be transparent about limited evidence.
+Avoid definitive language. Prefer CAUTION/OK with low confidence rather than GO.
 """
         else:
             sparse_block = """
 [주의 — 실질 리뷰 데이터가 제한적]
-단정적·확신하는 어조는 금지. "리뷰가 제한되어 확언하기 어렵지만" 같은 조심스러운 표현만 사용.
+단정 금지. GO보다 OK/CAUTION + 낮은 confidence를 우선 고려.
 """
     json_rules = _JSON_RULES_STRICT
     if lang != "en":
         json_rules += " (출력에는 JSON 하나만 포함할 것.)"
-    count_line_en = f"Collected Kakao review count: {n}\n"
-    count_line_ko = f"카카오 수집 리뷰 개수: {n}개 (스팸·공백 제외 가능)\n"
+    count_line_en = f"Collected Kakao review count: {n}\nUSED_REVIEW_COUNT_HINT: {used_hint}\n"
+    count_line_ko = f"카카오 수집 리뷰 개수: {n}개\nUSED_REVIEW_COUNT_HINT(모델 출력 confidence.usedReviewCount에 그대로 사용): {used_hint}\n"
 
     review_header = count_line_en if lang == "en" else count_line_ko
-    # Server-calculated metadata (treat as immutable signals; do NOT invent new values)
     meta_blob = {
         "sourceStats": source_stats or {},
         "reviewPatternStats": review_pattern_stats or {},
@@ -1076,17 +1672,17 @@ You MUST avoid definitive language. Use careful hedging and be transparent about
     }
     immutable_rule = """
 [IMPORTANT — server-calculated signals]
-- The JSON output MUST include dataConfidence and confidenceReason.
-- Use dataConfidence ONLY to adjust tone.
-- Do NOT invent or "correct" any values inside sourceStats/reviewPatternStats/reviewerSignals.
-- You may omit sourceStats/reviewPatternStats/reviewerSignals from the output JSON.
-  If you include them, copy EXACTLY the provided JSON without modification.
+- Output MUST include dataConfidence and confidenceReason (legacy compatibility).
+- Use dataConfidence ONLY to adjust tone; server may overwrite dataConfidence after your answer.
+- Do NOT invent or "correct" values inside sourceStats/reviewPatternStats/reviewerSignals.
+- You may omit those objects from output; if present, copy EXACTLY without modification.
+- confidence.usedReviewCount MUST equal USED_REVIEW_COUNT_HINT above.
 """
     return (
         f"{sec}\n\n"
         f"{instruction}\n{guidelines}{sparse_block}\n"
         f"[JSON — output rules]\n{json_rules}\n"
-        f"Required JSON keys and structure (see guidelines for semantics):\n{json_format}\n"
+        f"Required JSON keys and structure:\n{json_format}\n"
         f"{immutable_rule}\n"
         f"[Anonymous aggregated signals]\n{json.dumps(meta_blob, ensure_ascii=False)}\n"
         f"{review_header}"
@@ -1564,7 +2160,18 @@ def run_kakao_advanced_analysis(
     *,
     precompute: bool = False,
     max_reviews: int | None = None,
+    google_limited: dict | None = None,
 ):
+    gl = google_limited if isinstance(google_limited, dict) else {}
+    try:
+        g_rating_gl = float(gl["rating"]) if gl.get("rating") is not None else None
+    except (TypeError, ValueError, KeyError):
+        g_rating_gl = None
+    try:
+        g_total_gl = int(gl["user_ratings_total"]) if gl.get("user_ratings_total") is not None else None
+    except (TypeError, ValueError, KeyError):
+        g_total_gl = None
+
     name_clean = clean_place_name(place_name_raw)
     reg = extract_sido_gu_dong_for_log(address)
     print(
@@ -1615,6 +2222,8 @@ def run_kakao_advanced_analysis(
                         "place_id": diag.get("place_id"),
                         "matched_name": diag.get("matched_name") or "",
                         "matched_address": diag.get("matched_address") or "",
+                        "longitude": diag.get("longitude"),
+                        "latitude": diag.get("latitude"),
                     }
                     place_id = diag.get("place_id")
                     kakao_query = kq
@@ -1629,20 +2238,26 @@ def run_kakao_advanced_analysis(
                     f"🚨 [크롤러 중단] 1~3차 모두 실패. clean='{name_clean}' / 주소='{(address or '')[:100]}…'"
                 )
                 if collection is not None:
+                    fail_payload = build_advanced_unavailable_payload(
+                        lang,
+                        place_name=place_name_raw or query,
+                        address=address,
+                        google_rating=g_rating_gl,
+                        google_review_count=g_total_gl,
+                        mongo_status="error",
+                        short_reason_override=(
+                            "카카오맵에서 주소가 일치하는 식당을 찾지 못했습니다."
+                            if lang != "en"
+                            else "Could not match a Kakao Map listing to this address."
+                        ),
+                        data_limitations_extra=["kakao_place_match_failed"],
+                    )
+                    fail_payload["attemptedQueries"] = attempted_queries_debug
+                    fail_payload["cleanName"] = name_clean
+                    fail_payload["debug_reason"] = "kakao_place_match_failed_after_all_phases"
                     collection.update_one(
                         {"name": query},
-                        {
-                            "$set": {
-                                f"kakao_result_{lang}": {
-                                    "status": "error",
-                                    "reason": "카카오맵에서 주소가 일치하는 식당을 찾지 못했습니다.",
-                                    "attemptedQueries": attempted_queries_debug,
-                                    "cleanName": name_clean,
-                                    "address": address,
-                                    "debug_reason": "kakao_place_match_failed_after_all_phases",
-                                }
-                            }
-                        },
+                        {"$set": {f"kakao_result_{lang}": fail_payload}},
                     )
                 return
 
@@ -1670,6 +2285,8 @@ def run_kakao_advanced_analysis(
 
             if not isinstance(raw_reviews, list):
                 raw_reviews = []
+
+            place_url = f"https://place.map.kakao.com/{place_id}"
 
             filtered = filter_useful_reviews(raw_reviews)
             useful_reviews = filtered.get("useful_reviews") or []
@@ -1699,25 +2316,97 @@ def run_kakao_advanced_analysis(
                 "usedReviewCount": len(used_reviews_texts),
                 "collectedReviewCount": scraper_source_stats.get("collectedReviewCount"),
                 "fallbackUsed": scraper_source_stats.get("fallbackUsed"),
+                "kakaoPlaceUrl": scraper_source_stats.get("kakaoPlaceUrl") or place_url,
             }
             server_review_pattern_stats = (
                 filtered.get("reviewPatternStats") if isinstance(filtered.get("reviewPatternStats"), dict) else {}
             )
             server_reviewer_signals = scraper_reviewer_signals or {}
 
+            nm = "Not mentioned in reviews."
+            last_analyzed = datetime.now(timezone.utc).isoformat()
+            try:
+                lon_m = float(kakao_match.get("longitude")) if kakao_match.get("longitude") is not None else None
+            except (TypeError, ValueError):
+                lon_m = None
+            try:
+                lat_m = float(kakao_match.get("latitude")) if kakao_match.get("latitude") is not None else None
+            except (TypeError, ValueError):
+                lat_m = None
+
             if useful_cnt < 5 or len(raw_reviews) == 0:
-                # GPT 호출 금지 + DB 저장 — 리뷰 li 미수집·후기 미제공·fallback 제거 후 raw=[] 인 경우 포함
-                ins_msg = "현지 로컬 데이터베이스에서 참고 가능한 후기를 수집하지 못했습니다. (리뷰가 너무 적거나 가게 방침으로 미제공 상태일 수 있습니다.)"
-                payload = {
-                    "status": "insufficient_reviews",
-                    "reason": ins_msg,
-                    "sourceStats": server_source_stats,
-                    "reviewPatternStats": server_review_pattern_stats,
-                    "reviewerSignals": server_reviewer_signals,
-                    "dataConfidence": "insufficient",
-                    "confidenceReason": conf_reason,
-                    "kakao_matched_name": kakao_match.get("matched_name", ""),
-                    "kakao_matched_address": kakao_match.get("matched_address", ""),
+                # GPT 호출 금지 — useful 리뷰가 통계적으로 너무 적을 때
+                ins_body = (
+                    "There are not enough substantive Kakao reviews (fewer than 5 useful reviews after quality filtering) "
+                    "to run the advanced model safely."
+                    if lang == "en"
+                    else "품질 필터 후 ‘유용 리뷰’가 5개 미만이라 고급 모델 분석을 실행하지 않았습니다."
+                )
+                payload = build_advanced_unavailable_payload(
+                    lang,
+                    place_name=kakao_match.get("matched_name", "") or (name_clean or kakao_query),
+                    address=kakao_match.get("matched_address") or address,
+                    google_rating=g_rating_gl,
+                    google_review_count=g_total_gl,
+                    mongo_status="insufficient_reviews",
+                    short_reason_override=conf_reason,
+                    data_limitations_extra=[
+                        "Fewer than 5 useful Kakao reviews after filtering."
+                        if lang == "en"
+                        else "필터링 후 유용 카카오 리뷰가 5개 미만입니다."
+                    ],
+                )
+                payload["reason"] = ins_body
+                payload["sourceStats"] = server_source_stats
+                payload["reviewPatternStats"] = server_review_pattern_stats
+                payload["reviewerSignals"] = server_reviewer_signals
+                payload["dataConfidence"] = "insufficient"
+                payload["confidenceReason"] = conf_reason
+                payload["kakao_matched_name"] = kakao_match.get("matched_name", "")
+                payload["kakao_matched_address"] = kakao_match.get("matched_address", "")
+                payload["kakaoPlaceName"] = kakao_match.get("matched_name", "") or (name_clean or kakao_query)
+                payload["kakaoPlaceUrl"] = server_source_stats.get("kakaoPlaceUrl")
+                payload["kakaoAverageRating"] = server_source_stats.get("kakaoAverageRating")
+                payload["kakaoTotalReviewCount"] = server_source_stats.get("kakaoTotalReviewCount")
+                payload["rawReviewCount"] = raw_cnt
+                payload["usefulReviewCount"] = useful_cnt
+                payload["usedReviewCount"] = 0
+                payload["lastAnalyzedAt"] = last_analyzed
+                payload["romanizedName"] = ""
+                payload["eventProbability"] = 0
+                payload["details"] = {
+                    "taste": 2.75,
+                    "value": 2.75,
+                    "service": 3.0,
+                    "time": 3.0,
+                    "hygiene": 3.0,
+                }
+                payload["mustTryMenus"] = []
+                payload["vibeTags"] = []
+                payload["riskFlags"] = [
+                    {"type": "data_limit", "level": "high", "reason": ins_body[:400]},
+                ]
+                payload["alternativesIndex"] = {
+                    "primaryCategoryId": None,
+                    "primaryLabelEn": None,
+                    "analysisArea": {
+                        "sido": reg.get("sido") or "",
+                        "gugun": reg.get("gugun") or "",
+                        "dong": reg.get("dong") or "",
+                    },
+                    "geo": ({"lat": lat_m, "lon": lon_m} if lat_m is not None and lon_m is not None else {}),
+                }
+                payload["reviewReliabilityScore"] = _review_reliability_score(server_review_pattern_stats, 0)
+                payload["waitingRiskScore"] = 0.0
+                payload["sourceInfo"] = {
+                    "kakaoPlaceName": payload.get("kakaoPlaceName"),
+                    "kakaoPlaceUrl": server_source_stats.get("kakaoPlaceUrl"),
+                    "kakaoAverageRating": server_source_stats.get("kakaoAverageRating"),
+                    "kakaoTotalReviewCount": server_source_stats.get("kakaoTotalReviewCount"),
+                    "rawReviewCount": raw_cnt,
+                    "usefulReviewCount": useful_cnt,
+                    "usedReviewCount": 0,
+                    "lastAnalyzedAt": last_analyzed,
                 }
                 if collection is not None:
                     collection.update_one({"name": query}, {"$set": {f"kakao_result_{lang}": payload}})
@@ -1742,6 +2431,8 @@ def run_kakao_advanced_analysis(
             ai_data = sanitize_ai_result(ai_data, "deep")
             ai_data["kakao_matched_name"] = kakao_match.get("matched_name", "")
             ai_data["kakao_matched_address"] = kakao_match.get("matched_address", "")
+            if isinstance(ai_data.get("confidence"), dict):
+                ai_data["confidence"]["usedReviewCount"] = len(used_reviews_texts)
             # DB 저장: 서버 계산값이 최종 우선
             ai_data["sourceStats"] = server_source_stats
             ai_data["reviewPatternStats"] = server_review_pattern_stats
@@ -1749,6 +2440,65 @@ def run_kakao_advanced_analysis(
             ai_data["dataConfidence"] = data_conf
             ai_data["confidenceReason"] = conf_reason
             ai_data["status"] = "ok"
+            ai_data["lastAnalyzedAt"] = datetime.now(timezone.utc).isoformat()
+            ai_data["kakaoPlaceName"] = kakao_match.get("matched_name", "") or (name_clean or kakao_query)
+            ai_data["kakaoPlaceUrl"] = server_source_stats.get("kakaoPlaceUrl")
+            ai_data["kakaoAverageRating"] = server_source_stats.get("kakaoAverageRating")
+            ai_data["kakaoTotalReviewCount"] = server_source_stats.get("kakaoTotalReviewCount")
+            ai_data["rawReviewCount"] = raw_cnt
+            ai_data["usefulReviewCount"] = useful_cnt
+            ai_data["usedReviewCount"] = len(used_reviews_texts)
+            ai_data["analysisStatus"] = "advanced_verified"
+            ai_data["displayMode"] = "VERIFIED_ADVANCED"
+            ai_data["sourceInfo"] = {
+                "kakaoPlaceName": ai_data.get("kakaoPlaceName"),
+                "kakaoPlaceUrl": ai_data.get("kakaoPlaceUrl") or server_source_stats.get("kakaoPlaceUrl"),
+                "kakaoAverageRating": ai_data.get("kakaoAverageRating"),
+                "kakaoTotalReviewCount": ai_data.get("kakaoTotalReviewCount"),
+                "rawReviewCount": raw_cnt,
+                "usefulReviewCount": useful_cnt,
+                "usedReviewCount": len(used_reviews_texts),
+                "lastAnalyzedAt": ai_data.get("lastAnalyzedAt") or "",
+            }
+
+            blob_fc = "\n".join(used_reviews_texts)
+            fc = classify_food_taxonomy(blob_fc)
+            cats = fc.get("categories") or []
+            cat0: dict = {}
+            if cats and isinstance(cats[0], dict):
+                cat0 = cats[0]
+            ai_data["alternativesIndex"] = {
+                "primaryCategoryId": cat0.get("id"),
+                "primaryLabelEn": fc.get("primary_label_en"),
+                "analysisArea": {
+                    "sido": reg.get("sido") or "",
+                    "gugun": reg.get("gugun") or "",
+                    "dong": reg.get("dong") or "",
+                },
+                "geo": ({"lat": lat_m, "lon": lon_m} if lat_m is not None and lon_m is not None else {}),
+            }
+            ai_data["reviewReliabilityScore"] = round(
+                float(_review_reliability_score(server_review_pattern_stats, len(used_reviews_texts))), 4
+            )
+            ai_data["waitingRiskScore"] = float(_waiting_risk_score_from_flags(ai_data.get("riskFlags")))
+
+            dec_lbl = str((ai_data.get("decision") or {}).get("label") or "")
+            if dec_lbl in ("CAUTION", "AVOID"):
+                cur_place = {
+                    "visitSafetyScore": float(
+                        (ai_data.get("decision") or {}).get("visitSafetyScore") or ai_data.get("realScore") or 0.0
+                    ),
+                    "mongo_name": query,
+                    "analysis_area": ai_data["alternativesIndex"]["analysisArea"],
+                    "geo": ai_data["alternativesIndex"].get("geo") or {},
+                    "primary_category_id": ai_data["alternativesIndex"].get("primaryCategoryId"),
+                    "primary_label_en": ai_data["alternativesIndex"].get("primaryLabelEn"),
+                    "alternativeQuery": (ai_data.get("alternativeRecommendation") or {}).get("alternativeQuery"),
+                }
+                ai_data["nearbySaferAlternatives"] = find_nearby_alternatives(cur_place, lang)
+            else:
+                ai_data["nearbySaferAlternatives"] = []
+
             kakao_score = float(ai_data.get("realScore") or 0)
 
             if collection is not None:
@@ -1781,10 +2531,60 @@ def run_kakao_advanced_analysis(
                 f"🚨 [크롤러 예외] query={query!r} API검색='{kakao_query}' (정제='{name_clean}'): {e}"
             )
             if collection is not None:
+                err_msg = (
+                    "심층 분석 중 오류가 발생했습니다."
+                    if lang != "en"
+                    else "An error occurred during advanced analysis."
+                )
+                fail = build_advanced_unavailable_payload(
+                    lang,
+                    place_name=place_name_raw or query,
+                    address=address,
+                    google_rating=g_rating_gl,
+                    google_review_count=g_total_gl,
+                    mongo_status="no_data",
+                    short_reason_override=err_msg,
+                    data_limitations_extra=["kakao_pipeline_exception"],
+                )
+                fail["reason"] = err_msg
                 collection.update_one(
                     {"name": query},
-                    {"$set": {f"kakao_result_{lang}": {"status": "no_data"}}},
+                    {"$set": {f"kakao_result_{lang}": fail}},
                 )
+
+def _prepare_kakao_for_client(kd: dict, lang: str, query: str) -> dict:
+    """Legacy 캐시를 최신 결정 카드 형태로 승격하고, 필요 시 근처 대안을 채운다."""
+    if not isinstance(kd, dict):
+        return kd
+    upgrade_legacy_kakao_advanced_payload(kd)
+    ensure_kakao_advanced_envelope(kd, lang=lang)
+    if kd.get("status") not in ("ok", "insufficient_reviews"):
+        return kd
+    lbl = str((kd.get("decision") or {}).get("label") or "")
+    if lbl not in ("CAUTION", "AVOID"):
+        return kd
+    ex = kd.get("nearbySaferAlternatives")
+    if isinstance(ex, list) and len(ex) > 0:
+        return kd
+    idx = kd.get("alternativesIndex") if isinstance(kd.get("alternativesIndex"), dict) else {}
+    aa = idx.get("analysisArea") if isinstance(idx.get("analysisArea"), dict) else {}
+    geo = idx.get("geo") if isinstance(idx.get("geo"), dict) else {}
+    try:
+        vss = float((kd.get("decision") or {}).get("visitSafetyScore") or kd.get("realScore") or 0.0)
+    except (TypeError, ValueError):
+        vss = 0.0
+    cur_place = {
+        "visitSafetyScore": vss,
+        "mongo_name": query,
+        "analysis_area": aa,
+        "geo": geo,
+        "primary_category_id": idx.get("primaryCategoryId"),
+        "primary_label_en": idx.get("primaryLabelEn"),
+        "alternativeQuery": (kd.get("alternativeRecommendation") or {}).get("alternativeQuery"),
+    }
+    kd["nearbySaferAlternatives"] = find_nearby_alternatives(cur_place, lang)
+    return kd
+
 
 @app.post("/api/analyze")
 async def analyze_place(request: Request, background_tasks: BackgroundTasks):
@@ -1816,24 +2616,58 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
                     result_data["isNewDiscovery"] = False 
                     if result_data.get("scoreMeaning") != "review_risk_screening":
                         result_data["scoreMeaning"] = "review_risk_screening"
+                    if not result_data.get("googleSnippetScan"):
+                        result_data["googleSnippetScan"] = {
+                            "displayMode": "LIMITED_SCAN",
+                            "labelKo": "제한된 장소 확인",
+                            "labelEn": "Limited place check",
+                            "noticeKo": "구글 리뷰 샘플만으로는 방문 여부를 신뢰할 수 있게 판단하지 않습니다.",
+                            "noticeEn": "A tiny Google review sample is not enough for a trustworthy visit decision.",
+                        }
                     
                     if kakao_cache_key in cached_item:
                         kd_cached = cached_item[kakao_cache_key]
                         if isinstance(kd_cached, dict):
+                            result_data["kakao_data"] = _prepare_kakao_for_client(kd_cached, lang, query)
+                        else:
                             result_data["kakao_data"] = kd_cached
                         status = (
                             kd_cached.get("status")
                             if isinstance(kd_cached, dict)
                             else None
                         )
-                        # 프론트 폴링 중단·kakao_data 표시: 심층 성공(ok) 또는 리뷰 부족(insufficient_reviews)
-                        result_data["has_advanced"] = status in ("ok", "insufficient_reviews")
+                        result_data["has_advanced"] = status in (
+                            "ok",
+                            "insufficient_reviews",
+                            "error",
+                            "no_data",
+                        )
+                        if status == "ok" and kd_cached.get("analysisStatus") != "advanced_unavailable":
+                            result_data["advancedAnalysisStatus"] = "verified_advanced"
+                        elif status in ("insufficient_reviews", "error", "no_data") or (
+                            kd_cached.get("displayMode") == "LIMITED_SCAN"
+                            or kd_cached.get("analysisStatus") == "advanced_unavailable"
+                        ):
+                            result_data["advancedAnalysisStatus"] = "limited_scan"
+                        elif status == "processing":
+                            result_data["advancedAnalysisStatus"] = "pending"
+                        else:
+                            result_data["advancedAnalysisStatus"] = "basic_scan_only"
                     else:
                         result_data["has_advanced"] = False
+                        result_data["advancedAnalysisStatus"] = "pending"
                         collection.update_one({"name": query}, {"$set": {kakao_cache_key: {"status": "processing"}}}, upsert=True)
                         
                         background_tasks.add_task(
-                            run_kakao_advanced_analysis, query, result_data["name"], address, lang
+                            run_kakao_advanced_analysis,
+                            query,
+                            result_data["name"],
+                            address,
+                            lang,
+                            google_limited={
+                                "rating": result_data.get("rating"),
+                                "user_ratings_total": result_data.get("user_ratings_total"),
+                            },
                         )
 
                     kd = result_data.get("kakao_data") if isinstance(result_data.get("kakao_data"), dict) else None
@@ -1845,7 +2679,11 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
                     score_fb = float(result_data.get("realScore") or 0)
                     det_fb = dict(result_data.get("details") or {})
                     if kd:
-                        text_parts.append(kd.get("aiSummary") or "")
+                        dec = kd.get("decision") if isinstance(kd.get("decision"), dict) else None
+                        if dec and (dec.get("oneLine") or "").strip():
+                            text_parts.append(str(dec.get("oneLine")))
+                        else:
+                            text_parts.append(kd.get("aiSummary") or "")
                         score_fb = float(kd.get("realScore") or score_fb)
                         if kd.get("details"):
                             det_fb = dict(kd.get("details") or {})
@@ -1884,8 +2722,17 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
             "name": ai_data.get("translatedName") or place_info["name"],
             "address": place_info["address"],
             "rating": place_info["rating"],
+            "user_ratings_total": place_info.get("user_ratings_total"),
             "isNewDiscovery": True,
             "has_advanced": False,
+            "advancedAnalysisStatus": "pending",
+            "googleSnippetScan": {
+                "displayMode": "LIMITED_SCAN",
+                "labelKo": "제한된 장소 확인",
+                "labelEn": "Limited place check",
+                "noticeKo": "구글 리뷰 샘플만으로는 방문 여부를 신뢰할 수 있게 판단하지 않습니다.",
+                "noticeEn": "A tiny Google review sample is not enough for a trustworthy visit decision.",
+            },
         }
 
         attach_tags_and_plan_b(
@@ -1907,7 +2754,15 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
             collection.update_one({"name": query}, {"$set": update_data}, upsert=True)
         
         background_tasks.add_task(
-            run_kakao_advanced_analysis, query, place_info["name"], address, lang
+            run_kakao_advanced_analysis,
+            query,
+            place_info["name"],
+            address,
+            lang,
+            google_limited={
+                "rating": place_info.get("rating"),
+                "user_ratings_total": place_info.get("user_ratings_total"),
+            },
         )
 
         record_chargeable_analyze(client_ip)
@@ -1916,6 +2771,110 @@ async def analyze_place(request: Request, background_tasks: BackgroundTasks):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail="분석 실패")
+
+
+@app.get("/api/google-place-candidates")
+def api_google_place_candidates(q: str, max_results: int = 10):
+    if not (q or "").strip():
+        return []
+    return search_google_place_candidates(q.strip(), max_results=max_results)
+
+
+@app.post("/api/find-verified")
+async def api_find_verified(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    lang = data.get("lang") or "ko"
+    rows = query_verified_advanced_places(
+        lang,
+        sido=data.get("sido"),
+        gugun=data.get("gugun"),
+        dong=data.get("dong"),
+        area_query=data.get("area") or data.get("areaQuery"),
+        category=data.get("category") or data.get("foodCategory"),
+        purpose=data.get("purpose"),
+        limit=int(data.get("limit") or 40),
+    )
+    empty_msg_ko = "아직 이 조건에 맞는 검증된 가게가 충분하지 않습니다."
+    empty_msg_en = "We don't have enough verified places for this filter yet."
+    return {
+        "results": rows,
+        "empty": len(rows) == 0,
+        "emptyMessage": empty_msg_en if lang == "en" else empty_msg_ko,
+    }
+
+
+@app.post("/api/check-restaurant")
+async def api_check_restaurant(request: Request, background_tasks: BackgroundTasks):
+    """구글은 장소 후보 확인용. 심층 판정은 카카오 파이프라인만 사용한다."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    name = (data.get("name") or data.get("query") or "").strip()[:100]
+    address = (data.get("address") or "").strip()
+    lang = data.get("lang") or "ko"
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if collection is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    gl = {
+        "rating": data.get("googleRating"),
+        "user_ratings_total": data.get("googleUserRatingsTotal"),
+    }
+    kkey = f"kakao_result_{lang}"
+    doc = collection.find_one({"name": name})
+    kd = doc.get(kkey) if isinstance(doc, dict) else None
+    addr_use = address or (doc.get("address") if isinstance(doc, dict) else "") or ""
+
+    if isinstance(kd, dict):
+        st = kd.get("status")
+        if st == "processing":
+            return {"pending": True, "query": name, "lang": lang, "kakao_data": kd}
+        if st in ("ok", "insufficient_reviews", "error", "no_data"):
+            prepared = _prepare_kakao_for_client(dict(kd), lang, name)
+            adv = (
+                "verified_advanced"
+                if st == "ok" and prepared.get("analysisStatus") != "advanced_unavailable"
+                else "limited_scan"
+            )
+            return {
+                "pending": False,
+                "query": name,
+                "lang": lang,
+                "kakao_data": prepared,
+                "advancedAnalysisStatus": adv,
+            }
+
+    collection.update_one(
+        {"name": name},
+        {
+            "$set": {
+                "name": name,
+                "address": addr_use,
+                kkey: {"status": "processing"},
+            }
+        },
+        upsert=True,
+    )
+    background_tasks.add_task(
+        run_kakao_advanced_analysis,
+        name,
+        name,
+        addr_use,
+        lang,
+        google_limited=gl,
+    )
+    return {
+        "pending": True,
+        "query": name,
+        "lang": lang,
+        "kakao_data": {"status": "processing"},
+    }
+
 
 @app.post("/api/map-flags")
 def save_map_flag_disabled():

@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Loader2, Search, Map } from "lucide-react";
+import { Loader2, Search, Map, ChevronLeft } from "lucide-react";
 import MapOverlay from "./MapOverlay";
 import PlanBSection from "./PlanBSection";
 import type { PlanBPayload } from "./PlanBSection";
@@ -9,6 +9,9 @@ import confetti from "canvas-confetti";
 type Lang = "ko" | "en";
 
 const LANG_STORAGE_KEY = "jjin-view:lang";
+
+const API_BASE =
+  process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://gunbbang-backend.onrender.com";
 
 const translations: Record<
   Lang,
@@ -70,6 +73,7 @@ const translations: Record<
     planBComingSoon: string;
     advancedDeepFactTitle: string;
     advancedAnalyzeFailedTitle: string;
+    advancedAnalyzeInsufficientBody: string;
     kakaoSourceSearchPlace: string;
     kakaoSourceReviewOrigin: string;
     kakaoSourceAddress: string;
@@ -79,6 +83,44 @@ const translations: Record<
     kakaoSourceReviewsUsed: string;
     kakaoSourceStatUnavailable: string;
     kakaoSourceFallbackUnstable: string;
+    advancedVerifiedBadge: string;
+    advancedBasicOnlyBadge: string;
+    advancedPendingBadge: string;
+    advancedEvidenceLine: string;
+    advancedBasicOnlyMessage: string;
+    cardDecision: string;
+    cardBestFor: string;
+    cardAvoidIf: string;
+    cardMustKnow: string;
+    cardRiskFlags: string;
+    cardPractical: string;
+    cardFoodSignals: string;
+    cardNearbySafer: string;
+    cardNoAlternatives: string;
+    kakaoSourceLastAnalyzed: string;
+    importanceHigh: string;
+    importanceMedium: string;
+    importanceLow: string;
+    homeFindTitle: string;
+    homeFindDesc: string;
+    homeCheckTitle: string;
+    homeCheckDesc: string;
+    navLegacySearch: string;
+    findFlowTitle: string;
+    findAreaLabel: string;
+    findCategoryLabel: string;
+    findPurposeLabel: string;
+    findSubmit: string;
+    findLoading: string;
+    checkFlowTitle: string;
+    checkCandidateHint: string;
+    limitedScanHeadline: string;
+    limitedScanLine1: string;
+    limitedScanLine2: string;
+    limitedScanLine3: string;
+    verifiedAdvancedHeadline: string;
+    verifiedAdvancedLine1: string;
+    basicSnippetBadge: string;
   }
 > = {
   ko: {
@@ -124,7 +166,7 @@ const translations: Record<
     overloadError: "현재 접속자가 많아 AI가 과부하 상태입니다. 약 1분 후 다시 시도해 주세요!",
     energyLabel: "오늘의 분석 에너지",
     advancedButton: "🔥 고급 심층 분석 보기",
-    returnBasic: "↩️ 구글 기본 요약으로 돌아가기",
+    returnBasic: "↩️ 기본 확인 (구글 샘플)으로",
     advancedStatus: "🔥 심층 분석 완료",
     kakaoTrophyBanner: "황금 트로피 획득! 전국구 인생 맛집 등극!",
     kakaoFlagBanner: "검증된 맛집 깃발 획득! 실패 없는 맛집 등극!",
@@ -157,6 +199,47 @@ const translations: Record<
     kakaoSourceStatUnavailable: "확인 불가",
     kakaoSourceFallbackUnstable:
       "후기(li) 단위 수집이 불안정했을 수 있어요. 점수·요약 해석 시 참고해 주세요.",
+    advancedVerifiedBadge: "검증된 심층 분석",
+    advancedBasicOnlyBadge: "기본 스캔만",
+    advancedPendingBadge: "고급 분석 대기 중",
+    advancedEvidenceLine:
+      "카카오 리뷰 기준: 모델에 반영된 리뷰 {used}개 · 마지막 분석 {when}",
+    advancedBasicOnlyMessage: "이 장소는 아직 고급 분석 결과가 준비되지 않았습니다.",
+    cardDecision: "방문 결정",
+    cardBestFor: "이런 분께 추천",
+    cardAvoidIf: "이런 분은 피하세요",
+    cardMustKnow: "가기 전에 꼭 알 것",
+    cardRiskFlags: "리스크 신호",
+    cardPractical: "실전 정보",
+    cardFoodSignals: "메뉴·맛 신호",
+    cardNearbySafer: "근처 더 안전한 대안",
+    cardNoAlternatives: "조건에 맞는 사전 분석 대안이 아직 없습니다.",
+    kakaoSourceLastAnalyzed: "마지막 분석 시각",
+    importanceHigh: "높음",
+    importanceMedium: "보통",
+    importanceLow: "낮음",
+    homeFindTitle: "맛집 찾기",
+    homeFindDesc: "지역과 음식 종류를 고르면, 미리 검증된 가게를 보여드려요.",
+    homeCheckTitle: "맛집 검증하기",
+    homeCheckDesc:
+      "가려는 식당명을 입력하면, 리뷰 리스크와 근처 대안을 분석해드려요.",
+    navLegacySearch: "구글 빠른 스캔 (제한적)으로 검색…",
+    findFlowTitle: "검증된 식당 찾기",
+    findAreaLabel: "지역 (예: 연남동, 홍대, 강남구)",
+    findCategoryLabel: "음식 종류 (선택)",
+    findPurposeLabel: "목적 (선택)",
+    findSubmit: "검증된 가게 보기",
+    findLoading: "DB에서 불러오는 중…",
+    checkFlowTitle: "식당명으로 검증",
+    checkCandidateHint: "구글에서 후보를 찾은 뒤, 맞는 장소를 선택하세요.",
+    limitedScanHeadline: "제한된 장소 확인",
+    limitedScanLine1: "심층 검증을 완료하지 못했습니다.",
+    limitedScanLine2: "카카오맵 리뷰가 부족하거나 접근이 제한되어 있습니다.",
+    limitedScanLine3:
+      "아래 정보는 장소 확인용 제한 정보이며, 방문 여부를 판단하기에는 충분하지 않습니다.",
+    verifiedAdvancedHeadline: "검증된 심층 분석",
+    verifiedAdvancedLine1: "카카오맵 유효 리뷰 {used}개 기준",
+    basicSnippetBadge: "제한된 장소 확인 (구글 샘플)",
   },
   en: {
     loadingMessages: [
@@ -201,7 +284,7 @@ const translations: Record<
     overloadError: "AI is currently overloaded. Please try again in about 1 minute!",
     energyLabel: "Daily Energy",
     advancedButton: "🔥 View Advanced Deep Analysis",
-    returnBasic: "↩️ Return to Basic Google Summary",
+    returnBasic: "↩️ Back to limited Google sample view",
     advancedStatus: "🔥 Deep Analysis Complete",
     kakaoTrophyBanner: "Gold trophy earned! A national-tier, life-changing spot!",
     kakaoFlagBanner: "Verified map flag earned! A reliable, no-fail pick!",
@@ -234,17 +317,62 @@ const translations: Record<
     kakaoSourceStatUnavailable: "Unavailable",
     kakaoSourceFallbackUnstable:
       "Review list capture may have been unstable (fallback). Interpret scores/summary cautiously.",
+    advancedVerifiedBadge: "Verified advanced analysis",
+    advancedBasicOnlyBadge: "Basic scan only",
+    advancedPendingBadge: "Advanced analysis pending",
+    advancedEvidenceLine:
+      "Based on Kakao reviews: {used} useful reviews fed to the model · last analyzed {when}",
+    advancedBasicOnlyMessage: "Advanced analysis is not available yet for this place.",
+    cardDecision: "Decision",
+    cardBestFor: "Best for",
+    cardAvoidIf: "Avoid if",
+    cardMustKnow: "Must know before going",
+    cardRiskFlags: "Risk flags",
+    cardPractical: "Practical info",
+    cardFoodSignals: "Food signals",
+    cardNearbySafer: "Nearby safer alternatives",
+    cardNoAlternatives: "No precomputed alternatives matched the safety filters yet.",
+    kakaoSourceLastAnalyzed: "Last analyzed at",
+    importanceHigh: "High",
+    importanceMedium: "Medium",
+    importanceLow: "Low",
+    homeFindTitle: "Find restaurants",
+    homeFindDesc: "Choose an area and food type. We'll show pre-verified places.",
+    homeCheckTitle: "Check a restaurant",
+    homeCheckDesc:
+      "Already have a place in mind? Check risks and safer nearby alternatives.",
+    navLegacySearch: "Search with limited Google snippet scan…",
+    findFlowTitle: "Find verified spots",
+    findAreaLabel: "Area (e.g. Yeonnam, Hongdae, Gangnam-gu)",
+    findCategoryLabel: "Food type (optional)",
+    findPurposeLabel: "Purpose (optional)",
+    findSubmit: "Show verified places",
+    findLoading: "Loading from database…",
+    checkFlowTitle: "Verify by restaurant name",
+    checkCandidateHint: "Pick the correct place from Google candidates.",
+    limitedScanHeadline: "Limited place check",
+    limitedScanLine1: "Advanced verification could not be completed.",
+    limitedScanLine2: "Kakao reviews may be unavailable, restricted, or insufficient.",
+    limitedScanLine3:
+      "The information below is limited place-confirmation data and is not enough for a full visit decision.",
+    verifiedAdvancedHeadline: "Verified advanced analysis",
+    verifiedAdvancedLine1: "Based on {used} useful Kakao reviews",
+    basicSnippetBadge: "Limited place check (Google sample)",
   },
 };
 
-/** 플랫폼 이름이 섞일 수 있는 백엔드 reason 문자열을 UI 표시용으로 마스킹 */
-/** 심층 분석 불가 또는 리뷰 부족 — 정상 카카오 점수 카드/UI를 숨기고 공통 경고 패널로 처리 */
-function isKakaoDeepFailureStatus(status: unknown): boolean {
-  return (
-    status === "error" ||
-    status === "insufficient_reviews" ||
-    status === "no_data"
-  );
+/** 레거시 매칭/크롤 오류 — LIMITED_SCAN(심층 불가) 페이로드는 여기서 제외한다. */
+function isKakaoDeepFailureStatus(kdOrStatus: unknown): boolean {
+  if (kdOrStatus != null && typeof kdOrStatus === "object") {
+    const d = kdOrStatus as Record<string, unknown>;
+    if (d.displayMode === "LIMITED_SCAN" || d.analysisStatus === "advanced_unavailable") {
+      return false;
+    }
+    const st = d.status;
+    return st === "error" || st === "no_data";
+  }
+  const st = kdOrStatus;
+  return st === "error" || st === "no_data";
 }
 
 function maskBackendReason(reason: unknown): string {
@@ -267,6 +395,13 @@ function formatKakaoSourceRating(v: unknown, unavailable: string): string {
   const n = Number(v);
   if (!Number.isFinite(n)) return unavailable;
   return n.toFixed(1);
+}
+
+function formatIsoWhen(iso: unknown, unavailable: string): string {
+  if (typeof iso !== "string" || !iso.trim()) return unavailable;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return unavailable;
+  return d.toLocaleString();
 }
 
 /** 고급 분석 트로피/깃발 알림을 React Strict Mode 이중 effect에서도 1회만 (같은 식당+세션) */
@@ -309,6 +444,29 @@ export default function HomePage() {
   const [userDailyCount, setUserDailyCount] = useState(0);
   const [kakaoPollEnabled, setKakaoPollEnabled] = useState(false);
   const [planB, setPlanB] = useState<PlanBPayload | null>(null);
+  const [advancedAnalysisStatus, setAdvancedAnalysisStatus] = useState<
+    "verified_advanced" | "basic_scan_only" | "pending" | "limited_scan" | null
+  >(null);
+
+  type ProductFlow = "home" | "find" | "check" | "legacy";
+  const [productFlow, setProductFlow] = useState<ProductFlow>("home");
+  const [findArea, setFindArea] = useState("");
+  const [findCategory, setFindCategory] = useState("");
+  const [findPurpose, setFindPurpose] = useState("");
+  const [findLoading, setFindLoading] = useState(false);
+  const [findResults, setFindResults] = useState<Record<string, unknown>[]>([]);
+  const [findEmptyMsg, setFindEmptyMsg] = useState<string | null>(null);
+
+  const [checkSearchQuery, setCheckSearchQuery] = useState("");
+  const [checkSearching, setCheckSearching] = useState(false);
+  const [checkCandidates, setCheckCandidates] = useState<
+    {
+      name: string;
+      address: string;
+      rating?: number;
+      user_ratings_total?: number;
+    }[]
+  >([]);
 
   const isCritical = showResult && realScore !== null && realScore <= 2.4;
 
@@ -371,7 +529,7 @@ export default function HomePage() {
   useEffect(() => {
     if (!kakaoPollEnabled || hasAdvanced || !showResult || !selectedPlace) return;
 
-    const API = "https://gunbbang-backend.onrender.com/api/analyze";
+    const API = `${API_BASE}/api/analyze`;
     const { name, address } = selectedPlace;
     const maxAttempts = 36;
     let attempts = 0;
@@ -393,16 +551,40 @@ export default function HomePage() {
         if (response.status === 429 || !response.ok) return;
         const data = await response.json();
         const kd = data.kakao_data;
-        if (isKakaoDeepFailureStatus(kd?.status)) {
+        const isLimited =
+          kd &&
+          typeof kd === "object" &&
+          ((kd as Record<string, unknown>).displayMode === "LIMITED_SCAN" ||
+            (kd as Record<string, unknown>).analysisStatus === "advanced_unavailable" ||
+            data.advancedAnalysisStatus === "limited_scan");
+        if (isLimited) {
           setKakaoData(kd);
           setHasAdvanced(true);
           setKakaoPollEnabled(false);
+          setAdvancedAnalysisStatus("limited_scan");
+          return;
+        }
+        if (isKakaoDeepFailureStatus(kd)) {
+          setKakaoData(kd);
+          setHasAdvanced(true);
+          setKakaoPollEnabled(false);
+          setAdvancedAnalysisStatus("limited_scan");
           return;
         }
         if (data.has_advanced && kd) {
           setKakaoData(kd);
           setHasAdvanced(true);
           setKakaoPollEnabled(false);
+          if (
+            data.advancedAnalysisStatus === "verified_advanced" ||
+            data.advancedAnalysisStatus === "pending" ||
+            data.advancedAnalysisStatus === "basic_scan_only" ||
+            data.advancedAnalysisStatus === "limited_scan"
+          ) {
+            setAdvancedAnalysisStatus(data.advancedAnalysisStatus);
+          } else {
+            setAdvancedAnalysisStatus("verified_advanced");
+          }
           setPlanB({
             tags: Array.isArray(data.tags) ? data.tags : [],
             romanized_food_for_ui: Array.isArray(data.romanized_food_for_ui)
@@ -433,7 +615,8 @@ export default function HomePage() {
   // 트로피/깃발 알림·confetti·로컬 카운트: 고급 점수 기준, 식당당 1회
   useEffect(() => {
     if (!hasAdvanced || !kakaoData || !selectedPlace) return;
-    if (isKakaoDeepFailureStatus(kakaoData.status)) return;
+    if (advancedAnalysisStatus === "limited_scan") return;
+    if (isKakaoDeepFailureStatus(kakaoData)) return;
     const ks = Number(kakaoData.realScore);
     if (Number.isNaN(ks) || ks < 3.5) return;
 
@@ -489,13 +672,14 @@ export default function HomePage() {
     setIsAdvancedView(false);
     setKakaoPollEnabled(false);
     setPlanB(null);
+    setAdvancedAnalysisStatus(null);
     kakaoTrophyFlagAlertKey = null;
 
     const fetchSearchResults = async () => {
       try {
         const params = new URLSearchParams({ q: searchQuery.trim() });
         const response = await fetch(
-          `https://gunbbang-backend.onrender.com/api/search?${params.toString()}`
+          `${API_BASE}/api/search?${params.toString()}`
         );
         if (!response.ok) throw new Error("Search response not ok");
 
@@ -525,7 +709,7 @@ export default function HomePage() {
     const fetchAnalysis = async () => {
       try {
         const query = place.name;
-        const response = await fetch("https://gunbbang-backend.onrender.com/api/analyze", {
+        const response = await fetch(`${API_BASE}/api/analyze`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ query: query, address: place.address, lang }),
@@ -580,18 +764,41 @@ export default function HomePage() {
 
         // 💡 2. 고급 심층 데이터: 즉시·오류·성공 또는 백그라운드 폴링
         const kd = data.kakao_data as Record<string, unknown> | undefined;
-        if (isKakaoDeepFailureStatus(kd?.status)) {
+        const isLimited =
+          kd &&
+          (kd.displayMode === "LIMITED_SCAN" ||
+            kd.analysisStatus === "advanced_unavailable" ||
+            data.advancedAnalysisStatus === "limited_scan");
+        if (isLimited) {
           setKakaoData(kd);
           setHasAdvanced(true);
           setKakaoPollEnabled(false);
+          setAdvancedAnalysisStatus("limited_scan");
+        } else if (isKakaoDeepFailureStatus(kd)) {
+          setKakaoData(kd);
+          setHasAdvanced(true);
+          setKakaoPollEnabled(false);
+          setAdvancedAnalysisStatus("limited_scan");
         } else if (data.has_advanced && kd) {
           setHasAdvanced(true);
           setKakaoData(kd);
           setKakaoPollEnabled(false);
+          const ast = data.advancedAnalysisStatus;
+          if (
+            ast === "verified_advanced" ||
+            ast === "basic_scan_only" ||
+            ast === "pending" ||
+            ast === "limited_scan"
+          ) {
+            setAdvancedAnalysisStatus(ast);
+          } else {
+            setAdvancedAnalysisStatus("verified_advanced");
+          }
         } else {
           setHasAdvanced(false);
           setKakaoData(null);
           setKakaoPollEnabled(true);
+          setAdvancedAnalysisStatus("pending");
         }
 
         setIsAnalyzing(false);
@@ -605,6 +812,69 @@ export default function HomePage() {
       }
     };
     void fetchAnalysis();
+  };
+
+  const handleFindVerified = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setFindLoading(true);
+    setFindEmptyMsg(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/find-verified`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lang,
+          area: findArea.trim() || undefined,
+          category: findCategory.trim() || undefined,
+          purpose: findPurpose.trim() || undefined,
+        }),
+      });
+      if (!response.ok) throw new Error("find-verified failed");
+      const data: { results?: unknown[]; empty?: boolean; emptyMessage?: string } =
+        await response.json();
+      setFindResults(
+        Array.isArray(data.results) ? (data.results as Record<string, unknown>[]) : [],
+      );
+      setFindEmptyMsg(data.empty ? String(data.emptyMessage || "") : null);
+    } catch {
+      setFindResults([]);
+      setFindEmptyMsg(lang === "en" ? "Request failed." : "요청에 실패했습니다.");
+    } finally {
+      setFindLoading(false);
+    }
+  };
+
+  const handleCheckCandidatesSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!checkSearchQuery.trim()) return;
+    setCheckSearching(true);
+    try {
+      const params = new URLSearchParams({
+        q: checkSearchQuery.trim(),
+        max_results: "10",
+      });
+      const response = await fetch(
+        `${API_BASE}/api/google-place-candidates?${params.toString()}`,
+      );
+      if (!response.ok) throw new Error("candidates failed");
+      const rows: unknown = await response.json();
+      setCheckCandidates(
+        Array.isArray(rows)
+          ? (rows as Record<string, unknown>[]).map((x) => ({
+              name: String(x.name || ""),
+              address: String(x.address || ""),
+              rating: typeof x.rating === "number" ? x.rating : undefined,
+              user_ratings_total:
+                typeof x.user_ratings_total === "number" ? x.user_ratings_total : undefined,
+            }))
+          : [],
+      );
+    } catch {
+      setCheckCandidates([]);
+      alert(translations[lang].searchError);
+    } finally {
+      setCheckSearching(false);
+    }
   };
 
   const remainingEnergy = Math.max(0, 15 - userDailyCount);
@@ -698,6 +968,13 @@ export default function HomePage() {
                         </p>
                       ) : null}
 
+                      {!isAdvancedView && (
+                        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+                          <p className="font-bold">{translations[lang].basicSnippetBadge}</p>
+                          <p className="mt-1 leading-relaxed">{translations[lang].limitedScanLine3}</p>
+                        </div>
+                      )}
+
                       {/* 💡 1. 가짜 리뷰 정황 경고 (오직 '기본 검색' 화면에서만 뜸!) */}
                       {!isAdvancedView && eventProb >= 70 && (
                         <div className="mb-6 rounded-xl border-2 border-dashed border-red-500/60 bg-red-950/40 p-4 animate-in zoom-in duration-500">
@@ -718,7 +995,7 @@ export default function HomePage() {
                       {/* 💡 2. 고급 검색 점수 차이 안내 (오직 '기본 검색' 화면에 카카오 데이터가 도착했을 때만 뜸!) */}
                       {!isAdvancedView &&
                         kakaoData &&
-                        !isKakaoDeepFailureStatus(kakaoData.status) && (
+                        !isKakaoDeepFailureStatus(kakaoData) && (
                         <>
                           {scoreDiff >= 1.0 && (
                             <div className="mb-6 rounded-xl border-2 border-red-400 bg-red-50 px-4 py-3 text-red-800 animate-in zoom-in duration-500 shadow-sm">
@@ -750,12 +1027,12 @@ export default function HomePage() {
                       )}
                     </div>
 
-                    {!isKakaoDeepFailureStatus(kakaoData?.status) ||
+                    {!isKakaoDeepFailureStatus(kakaoData) ||
                     !isAdvancedView ? (
                       <>
                         {isAdvancedView &&
                           kakaoData &&
-                          !isKakaoDeepFailureStatus(kakaoData.status) &&
+                          !isKakaoDeepFailureStatus(kakaoData) &&
                           Number(kakaoData.realScore) >= 3.5 && (
                             <div
                               className={`mb-4 flex w-full items-center justify-center gap-2.5 rounded-2xl border px-4 py-3.5 text-center text-sm font-bold leading-snug shadow-md animate-in slide-in-from-top duration-700 ${
@@ -790,7 +1067,7 @@ export default function HomePage() {
                   <section className="space-y-6">
                     {isAdvancedView &&
                     kakaoData &&
-                    isKakaoDeepFailureStatus(kakaoData.status) ? (
+                    isKakaoDeepFailureStatus(kakaoData) ? (
                       <div
                         className={`rounded-2xl border px-4 py-4 text-sm ${
                           isCritical
@@ -806,14 +1083,297 @@ export default function HomePage() {
                           <span>{translations[lang].advancedAnalyzeFailedTitle}</span>
                         </p>
                         <p className="leading-relaxed pl-[1.75rem] text-sm whitespace-pre-wrap break-keep">
-                          {kakaoData.status === "insufficient_reviews"
-                            ? translations[lang].advancedAnalyzeInsufficientBody
-                            : maskBackendReason(
-                                typeof kakaoData.reason === "string"
-                                  ? kakaoData.reason
-                                  : "",
-                              )}
+                          {maskBackendReason(
+                            typeof kakaoData.reason === "string" ? kakaoData.reason : "",
+                          )}
                         </p>
+                      </div>
+                    ) : isAdvancedView &&
+                      kakaoData &&
+                      !isKakaoDeepFailureStatus(kakaoData) ? (
+                      <div className="space-y-4">
+                        <div className="flex flex-wrap gap-2">
+                          <span
+                            className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-bold border ${
+                              advancedAnalysisStatus === "verified_advanced"
+                                ? isCritical
+                                  ? "border-emerald-700 bg-emerald-950/40 text-emerald-200"
+                                  : "border-emerald-200 bg-emerald-50 text-emerald-900"
+                                : advancedAnalysisStatus === "limited_scan"
+                                  ? isCritical
+                                    ? "border-amber-800 bg-amber-950/40 text-amber-100"
+                                    : "border-amber-300 bg-amber-50 text-amber-950"
+                                  : advancedAnalysisStatus === "pending"
+                                    ? isCritical
+                                      ? "border-slate-600 bg-slate-800 text-slate-200"
+                                      : "border-slate-200 bg-slate-100 text-slate-700"
+                                    : isCritical
+                                      ? "border-slate-600 bg-slate-900 text-slate-300"
+                                      : "border-slate-200 bg-white text-slate-600"
+                            }`}
+                          >
+                            {advancedAnalysisStatus === "verified_advanced"
+                              ? translations[lang].advancedVerifiedBadge
+                              : advancedAnalysisStatus === "limited_scan"
+                                ? translations[lang].limitedScanHeadline
+                                : advancedAnalysisStatus === "pending"
+                                  ? translations[lang].advancedPendingBadge
+                                  : translations[lang].advancedBasicOnlyBadge}
+                          </span>
+                        </div>
+                        {advancedAnalysisStatus === "pending" && (
+                          <p
+                            className={`text-sm ${isCritical ? "text-slate-300" : "text-slate-600"}`}
+                          >
+                            {translations[lang].advancedBasicOnlyMessage}
+                          </p>
+                        )}
+                        {advancedAnalysisStatus === "limited_scan" && (
+                          <div
+                            className={`rounded-xl border px-3 py-3 text-xs leading-relaxed ${
+                              isCritical
+                                ? "border-amber-800/70 bg-amber-950/30 text-amber-100"
+                                : "border-amber-200 bg-amber-50 text-amber-950"
+                            }`}
+                          >
+                            <p className="font-bold">{translations[lang].limitedScanLine1}</p>
+                            <p className="mt-1">{translations[lang].limitedScanLine2}</p>
+                            <p className="mt-2">{translations[lang].limitedScanLine3}</p>
+                            {(() => {
+                              const li = kakaoData.limitedInfo as
+                                | Record<string, unknown>
+                                | undefined;
+                              if (!li || typeof li !== "object") return null;
+                              return (
+                                <dl className="mt-3 space-y-1 border-t border-amber-300/40 pt-2">
+                                  <div className="flex gap-2">
+                                    <dt className="opacity-80">Google</dt>
+                                    <dd>
+                                      ★{li.googleRating != null ? String(li.googleRating) : "—"} · reviews{" "}
+                                      {li.googleReviewCount != null ? String(li.googleReviewCount) : "—"}
+                                    </dd>
+                                  </div>
+                                  {typeof li.placeName === "string" && li.placeName.trim() ? (
+                                    <div className="flex gap-2">
+                                      <dt className="opacity-80">{translations[lang].kakaoSourceSearchPlace}</dt>
+                                      <dd>{li.placeName}</dd>
+                                    </div>
+                                  ) : null}
+                                </dl>
+                              );
+                            })()}
+                          </div>
+                        )}
+                        {advancedAnalysisStatus === "verified_advanced" && (
+                          <p
+                            className={`text-xs ${isCritical ? "text-slate-400" : "text-slate-600"}`}
+                          >
+                            {translations[lang].advancedEvidenceLine
+                              .replace(
+                                "{used}",
+                                String(
+                                  (kakaoData.confidence as { usedReviewCount?: unknown } | undefined)
+                                    ?.usedReviewCount ??
+                                    (kakaoData.sourceStats as { usedReviewCount?: unknown } | undefined)
+                                      ?.usedReviewCount ??
+                                    (kakaoData as { usedReviewCount?: unknown }).usedReviewCount ??
+                                    "—",
+                                ),
+                              )
+                              .replace(
+                                "{when}",
+                                formatIsoWhen(
+                                  (kakaoData as { lastAnalyzedAt?: unknown }).lastAnalyzedAt,
+                                  translations[lang].kakaoSourceStatUnavailable,
+                                ),
+                              )}
+                          </p>
+                        )}
+                        {(() => {
+                          const dec = (kakaoData.decision ?? {}) as Record<string, unknown>;
+                          const lbl = String(dec.label ?? "").toUpperCase();
+                          const cardBase = `rounded-xl border px-3 py-3 text-sm ${
+                            isCritical
+                              ? "border-slate-600 bg-slate-900/60 text-slate-100"
+                              : "border-slate-200 bg-white text-slate-800"
+                          }`;
+                          const h2 = `text-xs font-bold uppercase tracking-wide mb-2 ${
+                            isCritical ? "text-slate-400" : "text-slate-500"
+                          }`;
+                          const who = Array.isArray(kakaoData.whoShouldGo)
+                            ? (kakaoData.whoShouldGo as string[])
+                            : [];
+                          const avoidIf = Array.isArray(kakaoData.whoShouldAvoid)
+                            ? (kakaoData.whoShouldAvoid as string[])
+                            : [];
+                          const mustKnow = Array.isArray(kakaoData.mustKnowBeforeGoing)
+                            ? (kakaoData.mustKnowBeforeGoing as {
+                                point?: string;
+                                evidence?: string;
+                                importance?: string;
+                              }[])
+                            : [];
+                          const risks = Array.isArray(kakaoData.riskFlags) ? kakaoData.riskFlags : [];
+                          const pi = (kakaoData.practicalInfo ?? {}) as Record<string, string>;
+                          const fs = (kakaoData.foodSignals ?? {}) as Record<string, unknown>;
+                          const near = Array.isArray(kakaoData.nearbySaferAlternatives)
+                            ? (kakaoData.nearbySaferAlternatives as Record<string, unknown>[])
+                            : [];
+                          const labelColor =
+                            lbl === "GO"
+                              ? "text-emerald-600"
+                              : lbl === "OK"
+                                ? "text-blue-600"
+                                : lbl === "CAUTION"
+                                  ? "text-amber-600"
+                                  : lbl === "AVOID"
+                                    ? "text-red-600"
+                                    : "text-slate-500";
+                          return (
+                            <div className="grid gap-3">
+                              <div className={cardBase}>
+                                <p className={h2}>{translations[lang].cardDecision}</p>
+                                <p className={`text-2xl font-black ${labelColor}`}>{lbl || "—"}</p>
+                                <p className="mt-1 text-xs text-slate-500">
+                                  visit safety:{" "}
+                                  <span className="font-semibold">
+                                    {typeof dec.visitSafetyScore === "number"
+                                      ? (dec.visitSafetyScore as number).toFixed(1)
+                                      : String(dec.visitSafetyScore ?? "—")}
+                                  </span>
+                                </p>
+                                <p className="mt-2 font-medium">{String(dec.oneLine ?? "")}</p>
+                                <p className="mt-1 text-xs opacity-90">{String(dec.shortReason ?? "")}</p>
+                              </div>
+                              {(who.length > 0 || avoidIf.length > 0) && (
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                  {who.length > 0 ? (
+                                    <div className={cardBase}>
+                                      <p className={h2}>{translations[lang].cardBestFor}</p>
+                                      <ul className="list-disc pl-4 space-y-1 text-xs">
+                                        {who.map((x, i) => (
+                                          <li key={i}>{x}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  ) : null}
+                                  {avoidIf.length > 0 ? (
+                                    <div className={cardBase}>
+                                      <p className={h2}>{translations[lang].cardAvoidIf}</p>
+                                      <ul className="list-disc pl-4 space-y-1 text-xs">
+                                        {avoidIf.map((x, i) => (
+                                          <li key={i}>{x}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              )}
+                              {mustKnow.length > 0 ? (
+                                <div className={cardBase}>
+                                  <p className={h2}>{translations[lang].cardMustKnow}</p>
+                                  <ul className="space-y-2">
+                                    {mustKnow.map((m, i) => (
+                                      <li
+                                        key={i}
+                                        className="text-xs border-b border-slate-200/30 pb-2 last:border-0"
+                                      >
+                                        <span className="font-semibold">{m.point}</span>{" "}
+                                        <span className="opacity-80">({m.importance})</span>
+                                        <p className="mt-0.5 opacity-90">{m.evidence}</p>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : null}
+                              {risks.length > 0 ? (
+                                <div className={cardBase}>
+                                  <p className={h2}>{translations[lang].cardRiskFlags}</p>
+                                  <ul className="space-y-2">
+                                    {risks.map((r: unknown, i: number) => {
+                                      const o = r as Record<string, unknown>;
+                                      return (
+                                        <li key={i} className="text-xs">
+                                          <span className="font-semibold">{String(o.type)}</span> /{" "}
+                                          <span>{String(o.level)}</span>
+                                          <p className="mt-0.5">{String(o.reason)}</p>
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                </div>
+                              ) : null}
+                              {Object.keys(pi).length > 0 ? (
+                                <div className={cardBase}>
+                                  <p className={h2}>{translations[lang].cardPractical}</p>
+                                  <dl className="grid gap-1 text-xs">
+                                    {Object.entries(pi).map(([k, v]) => (
+                                      <div key={k} className="flex gap-2">
+                                        <dt className="w-40 shrink-0 opacity-70">{k}</dt>
+                                        <dd className="min-w-0 flex-1">{v}</dd>
+                                      </div>
+                                    ))}
+                                  </dl>
+                                </div>
+                              ) : null}
+                              {(Array.isArray(fs.mentionedMenus) &&
+                                (fs.mentionedMenus as string[]).length > 0) ||
+                              typeof fs.tastePattern === "string" ? (
+                                <div className={cardBase}>
+                                  <p className={h2}>{translations[lang].cardFoodSignals}</p>
+                                  {Array.isArray(fs.mentionedMenus) &&
+                                  (fs.mentionedMenus as string[]).length > 0 ? (
+                                    <p className="text-xs mb-2">
+                                      {(fs.mentionedMenus as string[]).join(", ")}
+                                    </p>
+                                  ) : null}
+                                  {typeof fs.tastePattern === "string" ? (
+                                    <p className="text-xs mb-1">{String(fs.tastePattern)}</p>
+                                  ) : null}
+                                  {typeof fs.portionValuePattern === "string" ? (
+                                    <p className="text-xs">{String(fs.portionValuePattern)}</p>
+                                  ) : null}
+                                </div>
+                              ) : null}
+                              {lbl === "CAUTION" || lbl === "AVOID" ? (
+                                <div className={cardBase}>
+                                  <p className={h2}>{translations[lang].cardNearbySafer}</p>
+                                  {near.length === 0 ? (
+                                    <p className="text-xs opacity-80">
+                                      {translations[lang].cardNoAlternatives}
+                                    </p>
+                                  ) : (
+                                    <ul className="space-y-2">
+                                      {near.map((a, i) => (
+                                        <li
+                                          key={i}
+                                          className="text-xs rounded-lg border border-slate-200/50 p-2"
+                                        >
+                                          <p className="font-bold">
+                                            {String(a.name ?? "")}{" "}
+                                            <span className="text-slate-500 font-normal">
+                                              (
+                                              {typeof a.visitSafetyScore === "number"
+                                                ? (a.visitSafetyScore as number).toFixed(1)
+                                                : "?"}{" "}
+                                              / 5)
+                                            </span>
+                                          </p>
+                                          <p className="opacity-90">{String(a.oneLine ?? "")}</p>
+                                          {typeof a.distanceMeters === "number" ? (
+                                            <p className="text-[10px] mt-1 opacity-70">
+                                              ~{Math.round(a.distanceMeters as number)} m
+                                            </p>
+                                          ) : null}
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })()}
                       </div>
                     ) : (
                       <div
@@ -839,7 +1399,7 @@ export default function HomePage() {
 
                     {isAdvancedView &&
                       kakaoData &&
-                      !isKakaoDeepFailureStatus(kakaoData.status) &&
+                      !isKakaoDeepFailureStatus(kakaoData) &&
                       String(kakaoData?.kakao_matched_name ?? "").trim() !==
                         "" && (
                         <div
@@ -979,7 +1539,8 @@ export default function HomePage() {
                     {isAdvancedView &&
                       chartDetails &&
                       kakaoData &&
-                      !isKakaoDeepFailureStatus(kakaoData.status) && (
+                      advancedAnalysisStatus !== "limited_scan" &&
+                      !isKakaoDeepFailureStatus(kakaoData) && (
                       <div>
                         <h3 className={`text-sm font-bold mb-3 ${isCritical ? 'text-slate-200' : 'text-slate-800'}`}>
                           {translations[lang].detailsTitle}
@@ -1031,14 +1592,21 @@ export default function HomePage() {
                       <button
                         type="button"
                         onClick={() => {
-                          if (isKakaoDeepFailureStatus(kakaoData?.status)) {
+                          if (isKakaoDeepFailureStatus(kakaoData)) {
                             setIsAdvancedView(true);
                             return;
                           }
                           setRealScore(kakaoData.realScore ?? 0);
                           setEventProb(kakaoData.eventProbability ?? 0);
-                          setAiSummary(kakaoData.aiSummary ?? "");
-                          setChartDetails(kakaoData.details ?? {taste:0, value:0, service:0, time:0});
+                          const dec = kakaoData?.decision as { oneLine?: string } | undefined;
+                          const one =
+                            dec && typeof dec.oneLine === "string" && dec.oneLine.trim()
+                              ? dec.oneLine.trim()
+                              : "";
+                          setAiSummary(one || kakaoData.aiSummary || "");
+                          setChartDetails(
+                            kakaoData.details ?? { taste: 0, value: 0, service: 0, time: 0 },
+                          );
                           setIsAdvancedView(true);
                         }}
                         className="w-full rounded-xl border border-amber-500 bg-amber-500 px-4 py-3 text-sm font-bold text-white shadow-md transition hover:bg-amber-600 active:scale-95 animate-in zoom-in"
@@ -1081,6 +1649,7 @@ export default function HomePage() {
                       onClick={() => {
                         setSearchQuery("");
                         setShowResult(false);
+                        setProductFlow("home");
                       }}
                       className={`w-full rounded-xl border px-4 py-3 text-sm font-medium transition shadow-sm mt-2 ${
                         isCritical 
@@ -1117,8 +1686,204 @@ export default function HomePage() {
               </div>
             </section>
           ) : !isAnalyzing ? (
-            <div className="flex flex-col items-center justify-start w-full transition-all mt-12"> 
-              
+            <div className="flex flex-col items-center justify-start w-full transition-all mt-12">
+              {productFlow === "home" ? (
+                <>
+                  <header className="mb-10 text-center relative z-10">
+                    <h1 className="text-4xl font-extrabold tracking-tight text-slate-900">ZzinView</h1>
+                    <p className="mt-3 text-sm text-slate-500 max-w-md mx-auto">
+                      {lang === "ko"
+                        ? "검증된 심층 분석과 제한된 장소 확인을 구분합니다."
+                        : "We separate verified deep analysis from limited place checks."}
+                    </p>
+                  </header>
+                  <div className="grid w-full max-w-lg gap-4 relative z-10">
+                    <button
+                      type="button"
+                      onClick={() => setProductFlow("find")}
+                      className="rounded-2xl border border-slate-200 bg-white px-5 py-5 text-left shadow-md transition hover:border-slate-400 hover:shadow-lg"
+                    >
+                      <p className="text-lg font-bold text-slate-900">{translations[lang].homeFindTitle}</p>
+                      <p className="mt-2 text-sm text-slate-600 leading-relaxed">
+                        {translations[lang].homeFindDesc}
+                      </p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setProductFlow("check")}
+                      className="rounded-2xl border border-slate-200 bg-white px-5 py-5 text-left shadow-md transition hover:border-slate-400 hover:shadow-lg"
+                    >
+                      <p className="text-lg font-bold text-slate-900">{translations[lang].homeCheckTitle}</p>
+                      <p className="mt-2 text-sm text-slate-600 leading-relaxed">
+                        {translations[lang].homeCheckDesc}
+                      </p>
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setProductFlow("legacy")}
+                    className="mt-10 text-xs text-slate-500 underline-offset-2 hover:underline"
+                  >
+                    {translations[lang].navLegacySearch}
+                  </button>
+                </>
+              ) : productFlow === "find" ? (
+                <div className="w-full max-w-lg space-y-6">
+                  <button
+                    type="button"
+                    onClick={() => setProductFlow("home")}
+                    className="inline-flex items-center gap-1 text-sm font-medium text-slate-600 hover:text-slate-900"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    {lang === "ko" ? "처음" : "Home"}
+                  </button>
+                  <h2 className="text-2xl font-bold text-slate-900">{translations[lang].findFlowTitle}</h2>
+                  <form onSubmit={handleFindVerified} className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <label className="block text-sm font-bold text-slate-700">
+                      {translations[lang].findAreaLabel}
+                      <input
+                        value={findArea}
+                        onChange={(e) => setFindArea(e.target.value)}
+                        className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                      />
+                    </label>
+                    <label className="block text-sm font-bold text-slate-700">
+                      {translations[lang].findCategoryLabel}
+                      <input
+                        value={findCategory}
+                        onChange={(e) => setFindCategory(e.target.value)}
+                        className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                        placeholder={lang === "ko" ? "예: 삼겹살, K-BBQ" : "e.g. K-BBQ, pork belly"}
+                      />
+                    </label>
+                    <label className="block text-sm font-bold text-slate-700">
+                      {translations[lang].findPurposeLabel}
+                      <input
+                        value={findPurpose}
+                        onChange={(e) => setFindPurpose(e.target.value)}
+                        className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                        placeholder="solo / date / group / foreignerFriendly / lowRisk / quickMeal"
+                      />
+                    </label>
+                    <button
+                      type="submit"
+                      disabled={findLoading}
+                      className="w-full rounded-xl bg-slate-900 py-3 text-sm font-bold text-white disabled:bg-slate-400"
+                    >
+                      {findLoading ? translations[lang].findLoading : translations[lang].findSubmit}
+                    </button>
+                  </form>
+                  {findEmptyMsg ? (
+                    <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                      {findEmptyMsg}
+                    </p>
+                  ) : null}
+                  <ul className="space-y-3">
+                    {findResults.map((row, idx) => {
+                      const r = row as Record<string, unknown>;
+                      const dec = (r.decision as Record<string, unknown>) || {};
+                      const risks = Array.isArray(r.topRiskFlags) ? r.topRiskFlags : [];
+                      return (
+                        <li
+                          key={`${String(r.name)}-${idx}`}
+                          className="rounded-xl border border-slate-200 bg-white p-4 text-sm shadow-sm"
+                        >
+                          <p className="font-bold text-slate-900">{String(r.name ?? "")}</p>
+                          <p className="text-xs text-slate-500 mt-1">{String(r.address ?? "")}</p>
+                          <p className="mt-2 text-xs text-slate-600">
+                            {(r.area as { gugun?: string })?.gugun || ""}{" "}
+                            {(r.area as { dong?: string })?.dong || ""}
+                          </p>
+                          <p className="mt-2 font-semibold text-slate-800">
+                            {String(dec.label ?? "")}{" "}
+                            <span className="text-slate-500 font-normal">
+                              · {lang === "ko" ? "방문 안전" : "visit safety"}{" "}
+                              {dec.visitSafetyScore != null ? String(dec.visitSafetyScore) : "—"}
+                            </span>
+                          </p>
+                          <p className="mt-1 text-xs text-slate-700">{String(dec.oneLine ?? "")}</p>
+                          <p className="mt-1 text-[11px] text-slate-500">
+                            confidence: {String((r.confidence as { level?: string })?.level ?? "")} · used{" "}
+                            {String(r.usedReviewCount ?? "")}
+                          </p>
+                          {risks.length > 0 ? (
+                            <ul className="mt-2 text-[11px] text-amber-900 space-y-1">
+                              {(risks as { type?: string; level?: string }[]).map((x, i) => (
+                                <li key={i}>
+                                  {x.type} ({x.level})
+                                </li>
+                              ))}
+                            </ul>
+                          ) : null}
+                          {r.foreignerAccessHint ? (
+                            <p className="mt-2 text-[11px] text-slate-600">
+                              {lang === "ko" ? "외국인 접근성" : "Foreigner access"}:{" "}
+                              {String(r.foreignerAccessHint)}
+                            </p>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : productFlow === "check" ? (
+                <div className="w-full max-w-lg space-y-6">
+                  <button
+                    type="button"
+                    onClick={() => setProductFlow("home")}
+                    className="inline-flex items-center gap-1 text-sm font-medium text-slate-600 hover:text-slate-900"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    {lang === "ko" ? "처음" : "Home"}
+                  </button>
+                  <h2 className="text-2xl font-bold text-slate-900">{translations[lang].checkFlowTitle}</h2>
+                  <p className="text-sm text-slate-600">{translations[lang].checkCandidateHint}</p>
+                  <form
+                    onSubmit={handleCheckCandidatesSubmit}
+                    className="flex flex-col gap-3 sm:flex-row sm:items-end"
+                  >
+                    <label className="flex-1 text-sm font-bold text-slate-700">
+                      {translations[lang].searchLabel}
+                      <input
+                        value={checkSearchQuery}
+                        onChange={(e) => setCheckSearchQuery(e.target.value)}
+                        className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                        placeholder={translations[lang].searchPlaceholder}
+                      />
+                    </label>
+                    <button
+                      type="submit"
+                      disabled={checkSearching || !checkSearchQuery.trim()}
+                      className="rounded-xl bg-slate-900 px-5 py-2 text-sm font-bold text-white disabled:bg-slate-400"
+                    >
+                      {checkSearching ? translations[lang].searching : translations[lang].searchButton}
+                    </button>
+                  </form>
+                  <ul className="space-y-2">
+                    {checkCandidates.map((c) => (
+                      <li key={`${c.name}-${c.address}`}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProductFlow("legacy");
+                            handleAnalyzePlace({ name: c.name, address: c.address });
+                          }}
+                          className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left text-sm text-slate-800 transition hover:bg-slate-100"
+                        >
+                          <p className="font-medium text-slate-900">{c.name}</p>
+                          <p className="mt-0.5 text-xs text-slate-500">{c.address}</p>
+                          {c.rating != null ? (
+                            <p className="mt-1 text-[11px] text-slate-500">
+                              Google ★{c.rating} ({c.user_ratings_total ?? "—"} reviews)
+                            </p>
+                          ) : null}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <>
               <header className="mb-12 text-center relative z-10">
                 <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl mb-4 text-slate-900">
                   {translations[lang].heroTitle}
@@ -1201,7 +1966,9 @@ export default function HomePage() {
                   )}
                 </section>
               </div>
-            </div> 
+                </>
+              )}
+            </div>
           ) : (
             <section className="rounded-2xl border border-slate-200 bg-white px-4 py-8 shadow-sm sm:px-6 sm:py-10">
               <div className="flex flex-col items-center text-center gap-6">

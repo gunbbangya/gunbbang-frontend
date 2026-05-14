@@ -157,11 +157,22 @@ def diagnose_kakao_place_match(place_name: str, google_address: str) -> dict:
                 "   ⚠️ [카카오] 주소 토큰 겹침 0 — 상호 보너스로만 후보 확정(위에서 점수 통과)"
             )
 
+        try:
+            lon = float(best_doc.get("x")) if best_doc.get("x") is not None else None
+        except (TypeError, ValueError):
+            lon = None
+        try:
+            lat = float(best_doc.get("y")) if best_doc.get("y") is not None else None
+        except (TypeError, ValueError):
+            lat = None
+
         return {
             "matched": True,
             "place_id": best_doc["id"],
             "matched_name": pname,
             "matched_address": a1 or a2,
+            "longitude": lon,
+            "latitude": lat,
             "reject_reason": None,
             "candidates": preview,
         }
@@ -185,6 +196,8 @@ def get_kakao_place_id(place_name: str, google_address: str) -> dict | None:
             "place_id": r["place_id"],
             "matched_name": r.get("matched_name") or "",
             "matched_address": r.get("matched_address") or "",
+            "longitude": r.get("longitude"),
+            "latitude": r.get("latitude"),
         }
     return None
 
@@ -452,12 +465,14 @@ def get_deep_kakao_reviews(place_id: str, max_reviews: int = 25) -> dict:
 
     return {
         "reviews": reviews_out,
+        "kakaoPlaceUrl": place_url,
         "sourceStats": {
             "kakaoAverageRating": kakao_average_rating if isinstance(kakao_average_rating, (int, float)) else None,
             "kakaoTotalReviewCount": kakao_total_review_count if isinstance(kakao_total_review_count, int) else None,
             "rawReviewCount": int(raw_count),
             "collectedReviewCount": int(collected_count),
             "fallbackUsed": bool(fallback_used),
+            "kakaoPlaceUrl": place_url,
         },
         "reviewerSignals": reviewer_signals,
     }

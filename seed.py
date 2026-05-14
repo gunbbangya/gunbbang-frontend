@@ -232,6 +232,10 @@ def seed_one_place(
                 lang,
                 precompute=True,
                 max_reviews=100,
+                google_limited={
+                    "rating": place_info.get("rating"),
+                    "user_ratings_total": place_info.get("user_ratings_total"),
+                },
             )
             kakao_actions.append(f"{lang}:done")
         except Exception as e:

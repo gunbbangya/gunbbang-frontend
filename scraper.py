@@ -1,6 +1,38 @@
 import os
 import requests
 
+
+def search_google_place_candidates(query: str, max_results: int = 10) -> list[dict]:
+    """
+    Google Places Text Search — 후보만 반환 (상세 reviews·OpenAI 없음).
+    맛집 검증하기에서 장소 확인용으로만 사용한다.
+    """
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        print("🚨 [에러] GOOGLE_API_KEY 누락")
+        return []
+    search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    params = {"query": query, "key": api_key, "language": "ko"}
+    try:
+        res = requests.get(search_url, params=params, timeout=15).json()
+        rows = res.get("results") or []
+        out: list[dict] = []
+        for r in rows[: max(1, min(15, int(max_results or 10)))]:
+            out.append(
+                {
+                    "name": r.get("name") or "",
+                    "address": r.get("formatted_address") or "",
+                    "rating": r.get("rating"),
+                    "user_ratings_total": r.get("user_ratings_total"),
+                    "place_id": r.get("place_id"),
+                }
+            )
+        return out
+    except Exception as e:
+        print(f"🚨 search_google_place_candidates: {e}")
+        return []
+
+
 def search_and_get_reviews(query: str):
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
